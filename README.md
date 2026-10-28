@@ -76,6 +76,17 @@ The other scripts regenerate the generated inputs:
 Design and decisions live in [`docs/`](docs/README.md). Contributor and agent rules are in
 [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md).
 
+## Roadmap
+
+Planned work, ranked by priority and risk, is in
+[`docs/specs/20261028_roadmap_future_improvements.md`](docs/specs/20261028_roadmap_future_improvements.md):
+
+- port Java ZetaSketch's own unit tests;
+- API conveniences;
+- native BigQuery KLL quantiles (`KLL_QUANTILES`), with a feasibility spike first;
+- faster sparse folds;
+- reporting the Java downgrade bug upstream.
+
 ## Differences from Java ZetaSketch
 
 Where Java throws or corrupts state, this crate does not. Everywhere else the output matches
