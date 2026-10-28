@@ -26,8 +26,6 @@ jobs:
     environment: crates-io
     env:
       TAG: ${{ github.event.inputs.tag || github.ref_name }}
-      # Fallback only; removed once trusted publishing has shipped a release.
-      FALLBACK_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
     steps:
       - uses: actions/checkout@v5
         with:
@@ -80,12 +78,8 @@ jobs:
             echo "CARGO_REGISTRY_TOKEN=${TOKEN}" >> "$GITHUB_ENV"
             echo "method=trusted" >> "$GITHUB_OUTPUT"
             echo "Trusted publishing token issued."
-          elif [ -n "${FALLBACK_TOKEN}" ]; then
-            echo "::warning::trusted publishing exchange failed (HTTP ${CODE}); using CARGO_REGISTRY_TOKEN secret"
-            echo "CARGO_REGISTRY_TOKEN=${FALLBACK_TOKEN}" >> "$GITHUB_ENV"
-            echo "method=secret" >> "$GITHUB_OUTPUT"
           else
-            echo "::error::trusted publishing exchange failed (HTTP ${CODE}) and no fallback token"
+            echo "::error::crates.io trusted publishing exchange failed (HTTP ${CODE}). Check the trusted publisher (Flip-to/zetasketch-rs, release.yml, environment crates-io)."
             exit 1
           fi
 
