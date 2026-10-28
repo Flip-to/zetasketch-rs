@@ -3,7 +3,7 @@ status: paid
 area: merge
 impact: medium
 effort: s
-paid_by: Flip-to/zetasketch-rs#PR
+paid_by: Flip-to/zetasketch-rs#1
 ---
 
 # Sparse downgrade re-added buffered values under the wrong encoding (Java bug, now fixed)

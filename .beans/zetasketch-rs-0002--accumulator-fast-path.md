@@ -17,7 +17,7 @@ bug; it is fixed and checked against new BigQuery fixtures.
 | Step | Who | Why | Evidence | When |
 |---|---|---|---|---|
 | Asked | Developer: Yuri Olive | Build the planned hot-path merge for many stored sketches | chat request "Build fast path" | 2026-10-28 |
-| Built | Agent: Claude (session 8b72ee89-5aeb-409a-b8be-e395357ed26a), approved by Yuri Olive | Reference implementation stays the oracle and the fallback (`docs/decisions/20261028_faithful_port_of_java_reference.md`) | branch `feat/accumulator-fast-path` | 2026-10-28 |
+| Built | Agent: Claude (session 8b72ee89-5aeb-409a-b8be-e395357ed26a), approved by Yuri Olive | Reference implementation stays the oracle and the fallback (`docs/decisions/20261028_faithful_port_of_java_reference.md`) | https://github.com/Flip-to/zetasketch-rs/pull/1 | 2026-10-28 |
 | Proven | Agent: Claude (session 8b72ee89-5aeb-409a-b8be-e395357ed26a), approved by Yuri Olive | L2: equality with the reference fold (21 golden + 450 randomized folds), 3 new BigQuery lowering-chain fixtures, 40k corrupt inputs without a panic; L1: bench 2.1x | local `cargo test --release` and `cargo bench --bench fold`, 2026-10-28; CI pending on the PR | 2026-10-28 |
 | Reviewed | Reviewer: Yuri Olive | | pending: PR review | |
 | Shipped | Developer: Yuri Olive | | pending: merge | |

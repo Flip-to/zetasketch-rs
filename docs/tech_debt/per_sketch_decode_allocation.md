@@ -3,7 +3,7 @@ status: paid
 area: merge
 impact: medium
 effort: m
-paid_by: Flip-to/zetasketch-rs#PR
+paid_by: Flip-to/zetasketch-rs#1
 ---
 
 # Every merge decodes and allocates the other sketch
