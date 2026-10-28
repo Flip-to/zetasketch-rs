@@ -52,6 +52,7 @@ cargo bench --bench fold                              # fold throughput
 uv run ruff check scripts tests/python && uv run ruff format --check scripts tests/python  # Python lint/format
 uv run pytest                                         # Python tooling tests (tests/python/)
 cargo llvm-cov --release --summary-only               # coverage (CI posts it to the job summary)
+cargo semver-checks check-release                     # public API vs latest crates.io release
 cd fuzz && cargo +nightly fuzz run differential_fold  # differential fuzzing (Linux/macOS)
 ```
 
