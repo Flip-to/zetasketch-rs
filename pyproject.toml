@@ -1,0 +1,33 @@
+[project]
+name = "zetasketch-rs-tools"
+version = "0.0.0"
+description = "Python tooling for zetasketch-rs: docs guard, bias-table and BigQuery fixture generators. Not published."
+requires-python = ">=3.10"
+dependencies = [
+  "pyyaml>=6.0.0",
+]
+
+[dependency-groups]
+dev = [
+  "pytest>=8.0.0",
+  "ruff>=0.14.0",
+]
+bigquery = [
+  "google-cloud-bigquery>=3.20",
+]
+
+[tool.uv]
+package = false
+default-groups = ["dev"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests/python"]
+pythonpath = ["."]
+addopts = "-q"
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+extend-select = ["I", "UP", "B"]

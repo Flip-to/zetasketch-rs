@@ -20,7 +20,9 @@ fn reference_fold(inputs: &[Vec<u8>]) -> (Vec<u8>, i64, i64) {
     }
     // Estimate before serialize: serialize() compacts a buffered sparse sketch, which can move
     // the estimate from linear counting to the dense estimator (reference behavior).
+    let card = acc.cardinality();
     let est = acc.estimate();
+    assert_eq!(card, est, "reference cardinality() != estimate()");
     (acc.serialize(), est, acc.num_values())
 }
 
@@ -29,7 +31,9 @@ fn fast_fold(acc: &mut Accumulator, inputs: &[Vec<u8>]) -> (Vec<u8>, i64, i64) {
     for b in inputs {
         acc.add_bytes(b).unwrap();
     }
+    let card = acc.cardinality();
     let est = acc.estimate();
+    assert_eq!(card, est, "accumulator cardinality() != estimate()");
     (acc.serialize().unwrap(), est, acc.num_values())
 }
 
@@ -122,6 +126,50 @@ fn randomized_same_precision() {
             reference_fold(&inputs),
             "round {round} p={p} k={k}"
         );
+    }
+}
+
+/// `cardinality(&self)` equals `estimate(&mut self)` at every step of interleaved adds, including
+/// while values sit unflushed in the sparse buffer.
+#[test]
+fn cardinality_matches_estimate_during_adds() {
+    let mut rng = Rng(0x0dd_ba11);
+    for p in [10, 15] {
+        let mut s = HyperLogLogPlusPlus::for_longs(p).unwrap();
+        for step in 0..3000 {
+            s.add_long(rng.below(20_000) as i64).unwrap();
+            if step % 37 == 0 {
+                let card = s.cardinality();
+                assert_eq!(card, s.estimate(), "p={p} step={step}");
+            }
+        }
+    }
+}
+
+#[test]
+fn many_tiny_sketches_fold_exactly() {
+    // Exercises the in-place insertion path: thousands of 1..12-value sketches, so most merges
+    // insert a few values into a large sparse union, and the fold crosses into dense.
+    let mut rng = Rng(0x5eed_1234_abcd_0001);
+    let mut acc = Accumulator::new();
+    for p in [10, 12, 15] {
+        let inputs: Vec<Vec<u8>> = (0..1500)
+            .map(|_| {
+                let mut s = HyperLogLogPlusPlus::for_longs(p).unwrap();
+                let start = rng.below(200_000) as i64;
+                for v in start..start + 1 + rng.below(12) as i64 {
+                    s.add_long(v).unwrap();
+                }
+                s.serialize()
+            })
+            .collect();
+        for k in [10, 100, 400, 1500] {
+            assert_eq!(
+                fast_fold(&mut acc, &inputs[..k]),
+                reference_fold(&inputs[..k]),
+                "p={p} k={k}"
+            );
+        }
     }
 }
 

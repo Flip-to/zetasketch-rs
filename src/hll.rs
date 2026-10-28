@@ -40,6 +40,7 @@ const TYPE_ALL: u8 = TYPE_LONG | TYPE_INTEGER | TYPE_STRING | TYPE_BYTES;
 /// Kind of value a sketch accepts. A sketch decoded from bytes without a value type accepts any
 /// kind until the first value is added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ValueKind {
     /// 64-bit integers (BigQuery `INT64`).
     Long,
@@ -157,7 +158,8 @@ pub(crate) fn validate_header(view: &StateView<'_>) -> Result<u8> {
     Ok(allowed)
 }
 
-/// HLL++ estimate over dense registers (Java `NormalRepresentation.estimate`).
+/// HLL++ estimate over dense registers (Java `NormalRepresentation.estimate`). Sums in register
+/// order on purpose: DECISION(dense_estimate_sequential_sum).
 pub(crate) fn dense_estimate(data: &[u8], p: i32) -> i64 {
     let mut num_zeros = 0u32;
     let mut sum = 0.0f64;
@@ -390,6 +392,9 @@ impl HyperLogLogPlusPlus {
 
     // ---- results -------------------------------------------------------------------------
 
+    /// Takes `&mut self`: a sparse sketch flushes its buffer first, as Java does
+    /// (DECISION(estimate_takes_mut_for_java_parity)).
+    ///
     /// Cardinality estimate, identical to ZetaSketch Java `longResult()` and BigQuery
     /// `HLL_COUNT.EXTRACT`.
     pub fn estimate(&mut self) -> i64 {
@@ -405,6 +410,34 @@ impl HyperLogLogPlusPlus {
             self.state.data.as_deref().unwrap_or(&[]),
             self.state.precision,
         )
+    }
+
+    /// The value [`estimate`](Self::estimate) would return right now, without changing the
+    /// sketch, so it works through a shared reference (cached results, `Arc`, concurrent reads).
+    ///
+    /// `estimate` also flushes the sparse add-buffer, as Java does. That flush can change *later*
+    /// behavior on interleaved add/estimate sequences
+    /// (DECISION(estimate_takes_mut_for_java_parity)), never the value returned. Use
+    /// `cardinality` for anything that is only read.
+    #[must_use]
+    pub fn cardinality(&self) -> i64 {
+        match &self.mode {
+            Mode::Sparse(buf) if !buf.values.is_empty() => {
+                // What the flush would write: dedupe(stored + buffer). Stored data was validated.
+                let merged = sorted_values(&self.state, buf)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let size = self.sparse_encoding().dedupe(&merged).len();
+                sparse_estimate(self.state.sparse_precision, size as i32)
+            }
+            Mode::Sparse(_) => sparse_estimate(self.state.sparse_precision, self.state.sparse_size),
+            Mode::Normal if !self.state.has_data() => 0,
+            Mode::Normal => dense_estimate(
+                self.state.data.as_deref().unwrap_or(&[]),
+                self.state.precision,
+            ),
+        }
     }
 
     /// Serializes to `AggregatorStateProto` bytes, identical to ZetaSketch Java

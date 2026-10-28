@@ -24,15 +24,34 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from google.cloud import bigquery
+if TYPE_CHECKING:
+    from google.cloud import bigquery
 
 OUT = Path(__file__).resolve().parent.parent / "tests" / "data" / "bigquery_golden.tsv"
 
 INT64_EDGES = [
-    0, 1, -1, 2, -2, 127, 128, -128, 255, 256, 65535, 65536,
-    2147483647, 2147483648, -2147483648, -2147483649, 4294967295, 4294967296,
-    9223372036854775807, -9223372036854775808,
+    0,
+    1,
+    -1,
+    2,
+    -2,
+    127,
+    128,
+    -128,
+    255,
+    256,
+    65535,
+    65536,
+    2147483647,
+    2147483648,
+    -2147483648,
+    -2147483649,
+    4294967295,
+    4294967296,
+    9223372036854775807,
+    -9223372036854775808,
 ]
 
 # family -> SQL expression of x. Each one exercises a different hash or type path.
@@ -90,8 +109,16 @@ MERGE_CASES: list[tuple[str, str, list[tuple[int, int, int]]]] = [
     ("int_ten_way_disjoint_p15", "int64", [(15, i * 700, (i + 1) * 700) for i in range(10)]),
     ("int_duplicates_p15", "int64", [(15, 0, 1000), (15, 0, 1000), (15, 0, 1000)]),
     ("int_lowering_chain_p11_p13_p10", "int64", [(11, 0, 300), (13, 200, 700), (10, 600, 900)]),
-    ("int_lowering_chain_p12_p15_p10_dense", "int64", [(12, 0, 400), (15, 0, 30000), (10, 100, 500)]),
-    ("int_lowering_chain_p13_p14_p11_p10", "int64", [(13, 0, 50), (14, 25, 400), (11, 300, 800), (10, 0, 90)]),
+    (
+        "int_lowering_chain_p12_p15_p10_dense",
+        "int64",
+        [(12, 0, 400), (15, 0, 30000), (10, 100, 500)],
+    ),
+    (
+        "int_lowering_chain_p13_p14_p11_p10",
+        "int64",
+        [(13, 0, 50), (14, 25, 400), (11, 300, 800), (10, 0, 90)],
+    ),
     ("string_sparse_sparse_overlap_p15", "string", [(15, 0, 100), (15, 50, 150)]),
     ("string_sparse_sparse_to_dense_p15", "string", [(15, 0, 3000), (15, 3000, 6000)]),
     ("string_sparse_dense_p15", "string", [(15, 0, 500), (15, 1000, 40000)]),
@@ -100,7 +127,11 @@ MERGE_CASES: list[tuple[str, str, list[tuple[int, int, int]]]] = [
     ("unicode_sparse_sparse_p15", "unicode", [(15, 0, 300), (15, 200, 600)]),
     ("int_hundred_way_p15", "int64", [(15, i * 50, (i + 1) * 50) for i in range(100)]),
     ("int_crossover_by_merge_p12", "int64", [(12, i * 150, (i + 1) * 150) for i in range(10)]),
-    ("int_null_inputs_p15", "int64", [(15, 0, 0), (15, 0, 100), (15, 5, 5), (15, 50, 300), (15, 9, 9)]),
+    (
+        "int_null_inputs_p15",
+        "int64",
+        [(15, 0, 0), (15, 0, 100), (15, 5, 5), (15, 50, 300), (15, 9, 9)],
+    ),
     *[
         (f"int_pair_p{a}_p{b}_{kind}", "int64", [(a, 0, n), (b, n // 2, n + n // 2)])
         for a, b in [(10, 12), (12, 10), (14, 16), (16, 14), (10, 16), (16, 10)]
@@ -132,6 +163,8 @@ SELECT
 
 
 def run(client: bigquery.Client, sql: str, params: list | None = None) -> list[bigquery.Row]:
+    from google.cloud import bigquery
+
     cfg = bigquery.QueryJobConfig(query_parameters=params or [])
     return list(client.query(sql, job_config=cfg).result())
 
@@ -156,6 +189,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", required=True, help="billing project for the query jobs")
     args = ap.parse_args()
+    # Imported here so the module (and its offline tests) work without the BigQuery client.
+    from google.cloud import bigquery
+
     client = bigquery.Client(project=args.project)
 
     lines = [

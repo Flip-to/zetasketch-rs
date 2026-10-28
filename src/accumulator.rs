@@ -14,7 +14,7 @@
 use crate::encoding::{self, Sparse};
 use crate::error::{Error, Result};
 use crate::hll::{self, HyperLogLogPlusPlus};
-use crate::proto::{varint_len, State, StateView, HYPERLOGLOG_PLUS_UNIQUE};
+use crate::proto::{State, StateView, HYPERLOGLOG_PLUS_UNIQUE};
 
 /// Reusable accumulator for merging many serialized sketches.
 ///
@@ -42,6 +42,8 @@ pub struct Accumulator {
     sparse_precision: i32,
     /// Java `sparse_size` field: the first input's value until a sparse merge rewrites it.
     sparse_size: i32,
+    /// Difference-encoded byte length of `sparse`, kept current across merges.
+    sparse_bytes: usize,
     dense: bool,
     registers: Vec<u8>,
     sparse: Vec<u32>,
@@ -116,6 +118,7 @@ impl Accumulator {
                 self.allowed
             )));
         }
+        // TECH_DEBT(mixed_precision_fallback_path): a precision change switches to the reference.
         if !fast
             || view.precision != self.precision
             || view.sparse_precision != self.sparse_precision
@@ -163,6 +166,23 @@ impl Accumulator {
         }
     }
 
+    /// [`estimate`](Self::estimate) through a shared reference: the same value, with no
+    /// mutation. Use it to read cached results.
+    #[must_use]
+    pub fn cardinality(&self) -> i64 {
+        if let Some(f) = &self.fallback {
+            return f.cardinality();
+        }
+        if !self.started {
+            return 0;
+        }
+        if self.dense {
+            hll::dense_estimate(&self.registers, self.precision)
+        } else {
+            hll::sparse_estimate(self.sparse_precision, self.sparse_size)
+        }
+    }
+
     /// The accumulated sketch, or `None` when nothing was added.
     ///
     /// # Panics
@@ -182,10 +202,44 @@ impl Accumulator {
     }
 
     /// Serialized result, byte-identical to the reference fold (`HLL_COUNT.MERGE_PARTIAL`), or
-    /// `None` when nothing was added.
+    /// `None` when nothing was added. Written straight from the accumulator's buffers: no copy of
+    /// the registers and no re-validation.
     #[must_use]
     pub fn serialize(&self) -> Option<Vec<u8>> {
-        self.to_sketch().map(|mut s| s.serialize())
+        if let Some(f) = &self.fallback {
+            return Some(f.clone().serialize());
+        }
+        if !self.started {
+            return None;
+        }
+        if self.dense {
+            return Some(self.view(Some(&self.registers), None).encode());
+        }
+        let sparse = encoding::encode_sparse(&self.sparse);
+        if sparse.len() >= self.max_sparse_bytes() {
+            // Only reachable when a single oversized sparse input was never merged. The
+            // reference compacts it to dense on serialize, so take that path.
+            return self.to_sketch().map(|mut s| s.serialize());
+        }
+        Some(self.view(None, Some(&sparse)).encode())
+    }
+
+    fn view<'a>(&self, data: Option<&'a [u8]>, sparse_data: Option<&'a [u8]>) -> StateView<'a> {
+        StateView {
+            r#type: HYPERLOGLOG_PLUS_UNIQUE,
+            num_values: self.num_values,
+            encoding_version: hll::ENCODING_VERSION,
+            value_type: self.value_type,
+            sparse_size: self.sparse_size,
+            precision: self.precision,
+            sparse_precision: self.sparse_precision,
+            data,
+            sparse_data,
+        }
+    }
+
+    fn max_sparse_bytes(&self) -> usize {
+        ((1i64 << self.precision) as f32 * 0.75f32) as usize
     }
 
     /// Decodes and validates the input's sparse stream into `incoming`, before any state change.
@@ -218,6 +272,7 @@ impl Accumulator {
         } else {
             self.dense = false;
             std::mem::swap(&mut self.sparse, &mut self.incoming);
+            self.sparse_bytes = view.sparse_data.map_or(0, <[u8]>::len);
         }
     }
 
@@ -238,19 +293,21 @@ impl Accumulator {
     /// reaches `0.75 * 2^p` bytes.
     fn merge_sparse(&mut self) {
         let enc = self.encoding();
-        encoding::merge_sorted_into(&self.sparse, &self.incoming, &mut self.merged);
-        enc.dedupe_in_place(&mut self.merged);
-        std::mem::swap(&mut self.sparse, &mut self.merged);
-        self.sparse_size = self.sparse.len() as i32;
-
-        let mut bytes = 0usize;
-        let mut last = 0u32;
-        for &v in &self.sparse {
-            bytes += varint_len(v - last);
-            last = v;
+        // A few values into a big union: insert in place. Otherwise one full merge pass.
+        if self.incoming.len() * 16 <= self.sparse.len() {
+            encoding::insert_dedupe(
+                enc,
+                &mut self.sparse,
+                &self.incoming,
+                &mut self.sparse_bytes,
+            );
+        } else {
+            self.sparse_bytes =
+                encoding::merge_dedupe_into(enc, &self.sparse, &self.incoming, &mut self.merged);
+            std::mem::swap(&mut self.sparse, &mut self.merged);
         }
-        let max_bytes = ((1i64 << self.precision) as f32 * 0.75f32) as usize;
-        if bytes >= max_bytes {
+        self.sparse_size = self.sparse.len() as i32;
+        if self.sparse_bytes >= self.max_sparse_bytes() {
             self.densify();
         }
     }
@@ -284,5 +341,38 @@ fn set_register(registers: &mut [u8], enc: Sparse, v: u32) {
 fn max_into(target: &mut [u8], source: &[u8]) {
     for (t, &s) in target.iter_mut().zip(source) {
         *t = (*t).max(s);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A single sparse input whose stream is already at the normalization threshold is never
+    /// merged, so the accumulator still holds it sparse. `serialize` must then match the
+    /// reference, which compacts it to dense. BigQuery never emits such a sketch, so this state
+    /// is built by hand.
+    #[test]
+    fn oversized_single_sparse_input_serializes_like_reference() {
+        let values: Vec<u32> = (0..800).map(|i| i * 32 + 1).collect();
+        let state = State {
+            r#type: HYPERLOGLOG_PLUS_UNIQUE,
+            num_values: 800,
+            encoding_version: hll::ENCODING_VERSION,
+            value_type: 8,
+            sparse_size: 800,
+            precision: 10,
+            sparse_precision: 15,
+            data: None,
+            sparse_data: Some(encoding::encode_sparse(&values)),
+        };
+        assert!(state.sparse_data.as_ref().unwrap().len() >= 768);
+        let bytes = state.to_bytes();
+
+        let mut reference = HyperLogLogPlusPlus::from_bytes(&bytes).unwrap();
+        let mut acc = Accumulator::new();
+        acc.add_bytes(&bytes).unwrap();
+        assert_eq!(acc.estimate(), reference.estimate());
+        assert_eq!(acc.serialize().unwrap(), reference.serialize());
     }
 }

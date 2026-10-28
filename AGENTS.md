@@ -16,5 +16,7 @@ must follow the rules in:
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo test --release
-uv run scripts/check_docs_layout.py --write-index
+uv run python scripts/check_docs_layout.py --write-index
+uv run ruff check scripts tests/python && uv run ruff format --check scripts tests/python
+uv run pytest
 ```

@@ -48,22 +48,30 @@ pub(crate) fn estimate_bias(estimate: f64, precision: i32) -> f64 {
         index + NUMBER_OF_NEIGHBORS_IN_KNN
     };
 
-    let mut weighted: Vec<(f64, f64)> = (bottom..top)
-        .map(|i| {
-            let d = means[i] - estimate;
-            (biases[i], d * d)
-        })
-        .collect();
-    // Stable, like Java's Collections.sort, so equal distances keep table order.
-    weighted.sort_by(|a, b| a.1.total_cmp(&b.1));
-    weighted.truncate(NUMBER_OF_NEIGHBORS_IN_KNN);
+    // At most 2 * k candidates; kept on the stack (this runs once per estimate).
+    let mut weighted = [(0.0f64, 0.0f64); 2 * NUMBER_OF_NEIGHBORS_IN_KNN];
+    let n = top - bottom;
+    for (slot, i) in weighted.iter_mut().zip(bottom..top) {
+        let d = means[i] - estimate;
+        *slot = (biases[i], d * d);
+    }
+    // Stable insertion sort by distance, like Java's Collections.sort: equal distances keep
+    // table order, which decides which neighbours are kept.
+    for i in 1..n {
+        let mut j = i;
+        while j > 0 && weighted[j - 1].1.total_cmp(&weighted[j].1).is_gt() {
+            weighted.swap(j - 1, j);
+            j -= 1;
+        }
+    }
+    let weighted = &weighted[..n.min(NUMBER_OF_NEIGHBORS_IN_KNN)];
 
     if weighted[0].1 == 0.0 {
         return weighted[0].0;
     }
     let mut sum = 0.0;
     let mut total_weight = 0.0;
-    for (bias, distance) in weighted {
+    for &(bias, distance) in weighted {
         total_weight += 1.0 / distance;
         sum += bias / distance;
     }

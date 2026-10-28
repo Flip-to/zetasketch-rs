@@ -22,6 +22,7 @@ tests/
   bigquery_golden.rs          # BigQuery HLL_COUNT parity (synthetic fixtures)
   accumulator.rs              # Accumulator == reference fold (golden + randomized + mixed precision)
   robustness.rs               # corrupt input never panics
+  python/                     # pytest for scripts/ (docs guard, generators, Rust/SQL family sync)
 benches/fold.rs               # reference fold vs Accumulator throughput (std-only)
 fuzz/                         # cargo-fuzz targets (own workspace; nightly)
   data/                       # golden_corpus.tsv, bigquery_golden.tsv
@@ -48,6 +49,9 @@ cargo fmt --check
 uv run scripts/check_docs_layout.py [--write-index]   # docs/decisions/tech_debt/beans guard
 uv run scripts/gen_bigquery_fixtures.py --project <p> # refresh BigQuery fixtures
 cargo bench --bench fold                              # fold throughput
+uv run ruff check scripts tests/python && uv run ruff format --check scripts tests/python  # Python lint/format
+uv run pytest                                         # Python tooling tests (tests/python/)
+cargo llvm-cov --release --summary-only               # coverage (CI posts it to the job summary)
 cd fuzz && cargo +nightly fuzz run differential_fold  # differential fuzzing (Linux/macOS)
 ```
 
@@ -65,6 +69,9 @@ cd fuzz && cargo +nightly fuzz run differential_fold  # differential fuzzing (Li
   `tests/accumulator.rs` green. Inputs it cannot handle exactly go to the reference fallback.
 - Decoding rejects out-of-range input; nothing on a public path may panic
   (`tests/robustness.rs`). Count arithmetic wraps like Java's `long`.
+- `estimate()` takes `&mut self` and the dense estimate sums in register order. Both are
+  needed for exact parity; see the decisions in `docs/decisions/`.
+- Public enums are `#[non_exhaustive]`. Keep any new public enum that way.
 - `src/bias_data.rs` is generated. Change `scripts/gen_bias_data.py`, never the output.
 - Shifts that can reach the type width use `wrapping_shl`, because Java masks shift amounts.
 
