@@ -65,11 +65,10 @@ enum Value {
 /// The value the generator's `FAMILIES[family]` SQL expression yields for `x`.
 fn family_value(family: &str, x: i64) -> Value {
     match family {
-        "int64" => Value::Long(x),
+        "int64nulls" if x % 3 == 0 => Value::Null,
+        "int64" | "int64nulls" => Value::Long(x),
         "int64neg" => Value::Long(-x * 7919 - 1),
         "int64edge" => Value::Long(INT64_EDGES[x as usize]),
-        "int64nulls" if x % 3 == 0 => Value::Null,
-        "int64nulls" => Value::Long(x),
         "string" => Value::Str(format!("v{x}")),
         "stringlen" => Value::Str("a".repeat(x as usize)),
         "string41" => Value::Str(format!("m{x:0>40}")),
