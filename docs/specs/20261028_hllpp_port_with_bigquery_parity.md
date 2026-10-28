@@ -92,6 +92,13 @@ Proof is two golden suites. Both use synthetic data only (`DECISION(synthetic_fi
   13 MERGE with `MERGE_PARTIAL` bytes and `MERGE` estimate).
 - `tests/bigquery_golden.rs` after adding the lowering-chain fixtures (2026-10-28): 69 INIT
   rows, 16 MERGE rows.
+- Fixture coverage expansion (2026-10-28): 166 INIT rows and 35 MERGE rows, all pass on the
+  first run with no code change. New cases:
+  - every precision 10 to 24;
+  - string and bytes lengths 0 to 199, covering every `Fingerprint2011` length branch;
+  - unicode, raw bytes, negative and extreme INT64, NULL values;
+  - crossover sweeps at p = 10 and 12;
+  - 12 precision pairs, a nested `MERGE_PARTIAL` tree, a 100-way fold and NULL sketch inputs.
 - `tests/accumulator.rs`: 5/5 pass. Byte, estimate and count equality with the reference fold
   on 21 golden merges, 300 randomized same-precision folds and 150 mixed-precision folds.
 - `tests/robustness.rs`: 2/2 pass (40,000 corrupt inputs, no panic, debug and release).
