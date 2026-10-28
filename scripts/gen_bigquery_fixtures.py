@@ -24,8 +24,10 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
+from typing import TYPE_CHECKING
 
-from google.cloud import bigquery
+if TYPE_CHECKING:
+    from google.cloud import bigquery
 
 OUT = Path(__file__).resolve().parent.parent / "tests" / "data" / "bigquery_golden.tsv"
 
@@ -161,6 +163,8 @@ SELECT
 
 
 def run(client: bigquery.Client, sql: str, params: list | None = None) -> list[bigquery.Row]:
+    from google.cloud import bigquery
+
     cfg = bigquery.QueryJobConfig(query_parameters=params or [])
     return list(client.query(sql, job_config=cfg).result())
 
@@ -185,6 +189,9 @@ def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--project", required=True, help="billing project for the query jobs")
     args = ap.parse_args()
+    # Imported here so the module (and its offline tests) work without the BigQuery client.
+    from google.cloud import bigquery
+
     client = bigquery.Client(project=args.project)
 
     lines = [

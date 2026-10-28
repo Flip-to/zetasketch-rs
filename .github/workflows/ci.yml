@@ -87,13 +87,18 @@ jobs:
           git diff --exit-code -- src/bias_data.rs
       - uses: astral-sh/setup-uv@v7
         with:
-          cache-dependency-glob: scripts/*.py
+          enable-cache: true
+          cache-dependency-glob: uv.lock
+      - name: Sync Python tooling (uv.lock)
+        run: uv sync --locked
       - name: Guard docs layout (specs, decisions, tech_debt, beans, A2V)
-        run: uv run scripts/check_docs_layout.py
-      - name: Ruff (scripts/)
+        run: uv run python scripts/check_docs_layout.py
+      - name: Ruff (scripts/, tests/python/)
         run: |
-          uvx ruff@0.14.2 check scripts
-          uvx ruff@0.14.2 format --check scripts
+          uv run ruff check scripts tests/python
+          uv run ruff format --check scripts tests/python
+      - name: Pytest (Python tooling)
+        run: uv run pytest
 
   coverage:
     name: Coverage (cargo-llvm-cov)

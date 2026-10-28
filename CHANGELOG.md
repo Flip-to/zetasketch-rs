@@ -31,6 +31,10 @@ All notable changes to this crate. The format follows
 
 ### Internal
 
+- Python tooling is a uv project (`pyproject.toml`, `uv.lock`) with pytest suites in
+  `tests/python/`, including checks that the BigQuery generator's value families and edge values
+  match the Rust rebuild test. Ruff lints and formats `scripts/` and `tests/python/`.
+
 - CI checks `cargo doc` with warnings denied, `cargo package`, and that `src/bias_data.rs`
   regenerates byte for byte from Java ZetaSketch `Data.java` at the pinned commit `d098c49`.
 - A nightly fuzz workflow (15 min per target) keeps its corpus between runs.
