@@ -100,6 +100,19 @@ jobs:
       - name: Pytest (Python tooling)
         run: uv run pytest
 
+  semver:
+    name: SemVer check against crates.io
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install toolchain + cargo-semver-checks
+        run: |
+          rustup toolchain install stable --profile minimal && rustup default stable
+          cargo install cargo-semver-checks --locked
+      - name: Public API changes are allowed by the version in Cargo.toml
+        # Compares against the latest published version on crates.io.
+        run: cargo semver-checks check-release
+
   coverage:
     name: Coverage (cargo-llvm-cov)
     runs-on: ubuntu-24.04
