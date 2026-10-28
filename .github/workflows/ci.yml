@@ -42,6 +42,19 @@ jobs:
       - name: Golden corpus + BigQuery parity
         run: cargo test --release
 
+  fuzz-smoke:
+    name: Fuzz smoke (60s per target)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v5
+      - name: Install nightly + cargo-fuzz
+        run: rustup toolchain install nightly --profile minimal && cargo install cargo-fuzz --locked
+      - name: Run targets
+        working-directory: fuzz
+        run: |
+          cargo +nightly fuzz run decode -- -max_total_time=60
+          cargo +nightly fuzz run differential_fold -- -max_total_time=60
+
   lint:
     name: Lint & docs layout guard
     runs-on: ubuntu-24.04
@@ -59,5 +72,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - uses: astral-sh/setup-uv@v7
+        with:
+          cache-dependency-glob: scripts/*.py
       - name: Guard docs layout (specs, decisions, tech_debt, beans, A2V)
         run: uv run scripts/check_docs_layout.py

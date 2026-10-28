@@ -1,9 +1,9 @@
 ---
-status: open
+status: paid
 area: merge
 impact: medium
 effort: m
-bean: zetasketch-rs-0001
+paid_by: Flip-to/zetasketch-rs#PR
 ---
 
 # Every merge decodes and allocates the other sketch
@@ -20,22 +20,30 @@ The first goal was exact parity, so the code mirrors the Java object model.
 
 ## Consequence
 
-Folding thousands of stored sketches into one result allocates and re-encodes per sketch. That
-cost has not been measured yet. What would measure it: a criterion bench that folds N stored
-p = 15 sketches.
+Measured with `cargo bench --bench fold` on 2026-10-28 (Windows, rustc 1.91.0, release). The
+workload is 2,000 synthetic p = 15 sketches, 70% sparse and 30% dense. The reference fold takes
+22.0 us per sketch.
 
 ## Fix
 
-Add an accumulator API that keeps the faithful path as the oracle:
+Paid by `Accumulator` (`src/accumulator.rs`):
 
-- zero-copy parse;
-- a reusable dense register array (32 KiB at p = 15);
-- a sorted-vector sparse fast path while the union stays small;
-- register max, with SIMD if a bench shows it pays.
+- parsing borrows the input bytes, with no copy;
+- the dense registers and the sparse buffers are reused across inputs and across `reset()`;
+- sparse input is decoded and validated in one pass;
+- the register max is a plain zip that the compiler vectorizes.
 
-Differential tests and fuzzing against `HyperLogLogPlusPlus` must show the same estimate and
-bytes.
+The same bench: 10.4 us per sketch (2.1x faster), with identical estimates. Dense inputs cost
+about 1.8 us each.
+
+Equality with the reference fold is enforced in `tests/accumulator.rs`:
+
+- all golden and BigQuery merges;
+- 300 randomized same-precision folds;
+- 150 mixed-precision folds;
+
+and in `fuzz/fuzz_targets/differential_fold.rs`.
 
 ## Workaround meanwhile
 
-Use `merge` on already-decoded sketches and reuse one accumulator per request.
+n/a: paid.

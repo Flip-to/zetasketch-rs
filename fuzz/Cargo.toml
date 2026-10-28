@@ -1,0 +1,31 @@
+[package]
+name = "zetasketch-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+[dependencies]
+libfuzzer-sys = "0.4"
+arbitrary = { version = "1", features = ["derive"] }
+zetasketch = { path = ".." }
+
+# Not part of the main crate's workspace.
+[workspace]
+members = ["."]
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+bench = false
+
+[[bin]]
+name = "differential_fold"
+path = "fuzz_targets/differential_fold.rs"
+test = false
+doc = false
+bench = false

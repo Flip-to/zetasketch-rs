@@ -60,6 +60,10 @@ MERGE_CASES = [
     ("int_lowering_sparse_dense_p10_p15", [(10, 0, 100), (15, 0, 60000)]),
     ("int_ten_way_disjoint_p15", [(15, i * 700, (i + 1) * 700) for i in range(10)]),
     ("int_duplicates_p15", [(15, 0, 1000), (15, 0, 1000), (15, 0, 1000)]),
+    # Lower, higher, then lowest precision: exercises the sparse downgrade of buffered values.
+    ("int_lowering_chain_p11_p13_p10", [(11, 0, 300), (13, 200, 700), (10, 600, 900)]),
+    ("int_lowering_chain_p12_p15_p10_dense", [(12, 0, 400), (15, 0, 30000), (10, 100, 500)]),
+    ("int_lowering_chain_p13_p14_p11_p10", [(13, 0, 50), (14, 25, 400), (11, 300, 800), (10, 0, 90)]),
 ]
 
 

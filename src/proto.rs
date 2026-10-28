@@ -29,6 +29,92 @@ const SPARSE_DATA_TAG: u32 = 6 << 3 | WIRE_LEN;
 const DEFAULT_ENCODING_VERSION: i32 = 1;
 const DEFAULT_VALUE_TYPE: i32 = 0;
 
+/// Fields of a serialized sketch, borrowing `data` and `sparse_data` from the input bytes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct StateView<'a> {
+    pub r#type: i32,
+    pub num_values: i64,
+    pub encoding_version: i32,
+    pub value_type: i32,
+    pub sparse_size: i32,
+    pub precision: i32,
+    pub sparse_precision: i32,
+    pub data: Option<&'a [u8]>,
+    pub sparse_data: Option<&'a [u8]>,
+}
+
+impl<'a> StateView<'a> {
+    /// Java `State.hasData`: present and non-empty.
+    pub fn has_data(&self) -> bool {
+        self.data.is_some_and(|d| !d.is_empty())
+    }
+
+    /// Java `State.hasSparseData`: present and non-empty.
+    pub fn has_sparse_data(&self) -> bool {
+        self.sparse_data.is_some_and(|d| !d.is_empty())
+    }
+
+    pub fn parse(bytes: &'a [u8]) -> Result<StateView<'a>> {
+        let mut view = StateView {
+            r#type: HYPERLOGLOG_PLUS_UNIQUE,
+            num_values: 0,
+            encoding_version: DEFAULT_ENCODING_VERSION,
+            value_type: DEFAULT_VALUE_TYPE,
+            sparse_size: 0,
+            precision: 0,
+            sparse_precision: 0,
+            data: None,
+            sparse_data: None,
+        };
+        let mut r = Reader { buf: bytes, pos: 0 };
+        while !r.at_end() {
+            let tag = r.tag()?;
+            match tag {
+                TYPE_TAG => view.r#type = r.varint32()?,
+                NUM_VALUES_TAG => view.num_values = r.varint64()? as i64,
+                ENCODING_VERSION_TAG => view.encoding_version = r.varint32()?,
+                VALUE_TYPE_TAG => view.value_type = r.varint32()?,
+                HLL_STATE_TAG => {
+                    let nested = r.length_delimited()?;
+                    view.parse_hll(nested)?;
+                }
+                _ => r.skip(tag)?,
+            }
+        }
+        Ok(view)
+    }
+
+    fn parse_hll(&mut self, bytes: &'a [u8]) -> Result<()> {
+        let mut r = Reader { buf: bytes, pos: 0 };
+        while !r.at_end() {
+            let tag = r.tag()?;
+            match tag {
+                SPARSE_SIZE_TAG => self.sparse_size = r.varint32()?,
+                PRECISION_TAG => self.precision = r.varint32()?,
+                SPARSE_PRECISION_TAG => self.sparse_precision = r.varint32()?,
+                DATA_TAG => self.data = Some(r.length_delimited()?),
+                SPARSE_DATA_TAG => self.sparse_data = Some(r.length_delimited()?),
+                _ => r.skip(tag)?,
+            }
+        }
+        Ok(())
+    }
+
+    pub fn to_state(self) -> State {
+        State {
+            r#type: self.r#type,
+            num_values: self.num_values,
+            encoding_version: self.encoding_version,
+            value_type: self.value_type,
+            sparse_size: self.sparse_size,
+            precision: self.precision,
+            sparse_precision: self.sparse_precision,
+            data: self.data.map(<[u8]>::to_vec),
+            sparse_data: self.sparse_data.map(<[u8]>::to_vec),
+        }
+    }
+}
+
 /// Decoded fields of a sketch. `data` holds the dense registers (one byte per register),
 /// `sparse_data` the difference/varint-encoded sorted sparse values.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -71,40 +157,22 @@ impl State {
         self.sparse_data.as_ref().is_some_and(|d| !d.is_empty())
     }
 
-    pub fn parse(bytes: &[u8]) -> Result<State> {
-        let mut state = State::default();
-        let mut r = Reader { buf: bytes, pos: 0 };
-        while !r.at_end() {
-            let tag = r.tag()?;
-            match tag {
-                TYPE_TAG => state.r#type = r.varint32()?,
-                NUM_VALUES_TAG => state.num_values = r.varint64()? as i64,
-                ENCODING_VERSION_TAG => state.encoding_version = r.varint32()?,
-                VALUE_TYPE_TAG => state.value_type = r.varint32()?,
-                HLL_STATE_TAG => {
-                    let nested = r.length_delimited()?;
-                    state.parse_hll(nested)?;
-                }
-                _ => r.skip(tag)?,
-            }
+    pub fn view(&self) -> StateView<'_> {
+        StateView {
+            r#type: self.r#type,
+            num_values: self.num_values,
+            encoding_version: self.encoding_version,
+            value_type: self.value_type,
+            sparse_size: self.sparse_size,
+            precision: self.precision,
+            sparse_precision: self.sparse_precision,
+            data: self.data.as_deref(),
+            sparse_data: self.sparse_data.as_deref(),
         }
-        Ok(state)
     }
 
-    fn parse_hll(&mut self, bytes: &[u8]) -> Result<()> {
-        let mut r = Reader { buf: bytes, pos: 0 };
-        while !r.at_end() {
-            let tag = r.tag()?;
-            match tag {
-                SPARSE_SIZE_TAG => self.sparse_size = r.varint32()?,
-                PRECISION_TAG => self.precision = r.varint32()?,
-                SPARSE_PRECISION_TAG => self.sparse_precision = r.varint32()?,
-                DATA_TAG => self.data = Some(r.length_delimited()?.to_vec()),
-                SPARSE_DATA_TAG => self.sparse_data = Some(r.length_delimited()?.to_vec()),
-                _ => r.skip(tag)?,
-            }
-        }
-        Ok(())
+    pub fn parse(bytes: &[u8]) -> Result<State> {
+        StateView::parse(bytes).map(StateView::to_state)
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
@@ -163,6 +231,18 @@ pub(crate) fn put_varint(out: &mut Vec<u8>, mut v: u64) {
         v >>= 7;
     }
     out.push(v as u8);
+}
+
+/// Encoded length of `v` as a varint.
+#[inline]
+pub(crate) fn varint_len(v: u32) -> usize {
+    match v {
+        0..=0x7f => 1,
+        0x80..=0x3fff => 2,
+        0x4000..=0x1f_ffff => 3,
+        0x20_0000..=0x0fff_ffff => 4,
+        _ => 5,
+    }
 }
 
 struct Reader<'a> {
