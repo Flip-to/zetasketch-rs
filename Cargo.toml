@@ -1,0 +1,30 @@
+[package]
+name = "zetasketch"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.75"
+license = "Apache-2.0"
+description = "Byte-compatible Rust port of Google ZetaSketch HyperLogLog++ (the sketch format behind BigQuery HLL_COUNT)"
+repository = "https://github.com/Flip-to/zetasketch-rs"
+readme = "README.md"
+keywords = ["hyperloglog", "hll", "sketch", "bigquery", "cardinality"]
+categories = ["algorithms", "data-structures", "encoding"]
+exclude = [".beans/", ".claude/", "docs/", "scripts/"]
+
+[dependencies]
+
+[lints.rust]
+unsafe_code = "forbid"
+missing_docs = "warn"
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_sign_loss = "allow"
+cast_precision_loss = "allow"
+cast_lossless = "allow"
+module_name_repetitions = "allow"
+many_single_char_names = "allow"
+doc_markdown = "allow"
+struct_field_names = "allow"

@@ -1,0 +1,13 @@
+zetasketch-rs
+Copyright 2026 Flip.to
+
+This product includes software ported from:
+
+- ZetaSketch (https://github.com/google/zetasketch), Copyright 2019 Google LLC,
+  licensed under the Apache License, Version 2.0. The HLL++ representations, encodings, state
+  serialization and the bias-correction tables (src/bias_data.rs) are derived from it.
+- Guava (https://github.com/google/guava), Copyright Google LLC, licensed under the Apache
+  License, Version 2.0. src/hash.rs is a port of Fingerprint2011.
+
+tests/data/golden_corpus.tsv is taken from zetasketch-cpp
+(https://github.com/rowkeydb-com/zetasketch-cpp), licensed under the Apache License, Version 2.0.
