@@ -1,5 +1,8 @@
 # zetasketch-rs
 
+> Unofficial: not affiliated with or endorsed by Google. Different from the `zetasketch-rs` crate
+> (a separate port by another author).
+
 A byte-compatible Rust port of [Google ZetaSketch](https://github.com/google/zetasketch)
 HyperLogLog++, the sketch format that BigQuery `HLL_COUNT.*` produces and consumes.
 
