@@ -5,6 +5,9 @@
 #![allow(clippy::unreadable_literal)]
 // Bit patterns are written out as in Java, including `0 << n` index fields.
 #![allow(clippy::identity_op)]
+// Java's bit patterns are kept verbatim (decimal operands in `|`); the lint is newer than
+// some toolchains, hence `unknown_lints`.
+#![allow(unknown_lints, clippy::decimal_bitwise_operands)]
 
 // Not applicable: ByteSliceTest (all tests): Java buffer class with no Rust counterpart (Rust
 // uses `&[u8]` / `Vec<u8>`).
