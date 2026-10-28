@@ -20,7 +20,7 @@ What BigQuery supports, checked with queries in the EU location on 2026-10-28:
 |---|---|---|---|
 | HLL++ (native) | `HLL_COUNT.INIT/MERGE/MERGE_PARTIAL/EXTRACT` | ZetaSketch `AggregatorStateProto`, type 112 | Done (0.1.0) |
 | KLL quantiles (native) | `KLL_QUANTILES.INIT_INT64/INIT_FLOAT64`, `MERGE_*`, `EXTRACT_*`, `EXTRACT_POINT_*` | Same proto envelope, type 113 (`KLL_QUANTILES.INIT_INT64` output starts `08 71`). No `INIT_UINT64`/`INIT_DOUBLE` (BigQuery returns "Function not found") | Missing |
-| Apache DataSketches (`bqutil.datasketches_<region>` UDFs) | Theta, Tuple, CPC, HLL, KLL, REQ, frequent items, t-digest | Apache DataSketches binary (for example, compact theta preamble `01 04 03`) | Missing |
+| Apache DataSketches (`bqutil.datasketches_<region>` UDFs) | Theta, Tuple, CPC, HLL, KLL, REQ, frequent items, t-digest | Apache DataSketches binary (for example, compact theta preamble `01 04 03`) | Out of scope |
 | Per-query approximations | `APPROX_QUANTILES`, `APPROX_TOP_COUNT/SUM`, `APPROX_COUNT_DISTINCT` | No stored sketch | Out of scope |
 
 References:
@@ -93,27 +93,14 @@ Plan: a time-boxed spike that (a) decodes the proto fields, (b) matches `EXTRACT
 `EXTRACT_POINT_*` exactly on single sketches, and (c) measures whether merges reproduce
 `MERGE_PARTIAL` bytes. Its result decides the scope before any further KLL work.
 
-### 4. Apache DataSketches parity (Theta, Tuple, CPC, ...)
-
-These are not ZetaSketch. Do not reimplement them. The official
-[`apache/datasketches-rust`](https://github.com/apache/datasketches-rust) (crate `datasketches`
-0.6.0-rc.1, last pushed 2026-10-27) already has `thetafamily`, `cpc`, `hll`, `kll`, `req`,
-`tdigest`, `frequencies`, `bloom` and `countmin`. The contribution here is a BigQuery parity suite:
-
-- generate fixtures with the `bqutil.datasketches_<region>` UDFs over synthetic inputs;
-- check that `datasketches` reads them and gives the same estimates and set operations;
-- upstream the suite to Apache if they take it.
-
-Theta comes first: it is the most used, and it adds what HLL++ lacks, intersection and difference.
-
-### 5. Faster sparse inputs in `Accumulator`
+### 4. Faster sparse inputs in `Accumulator`
 
 `cargo bench --bench fold` (2026-10-28): sparse inputs cost about 10 ns per value, mostly varint
 decoding and scattered register writes. Candidates: branch-light varint decoding, and fusing
 validate and apply for dense targets. Only worth doing if a consumer benchmark shows sparse
 inputs dominate.
 
-### 6. Upstream the Java downgrade bug
+### 5. Upstream the Java downgrade bug
 
 File an issue on `google/zetasketch` with a failing JUnit test: on a p11, p13, p10 merge chain,
 `SparseRepresentation.downgrade` re-adds buffered values without converting them. See
@@ -123,6 +110,11 @@ open PR #18, which fixes the read position of the merge source.
 
 ### Out of scope
 
+Apache DataSketches (Theta, Tuple, CPC, ...) is a separate format from ZetaSketch, and it already
+has an official Rust port, [`apache/datasketches-rust`](https://github.com/apache/datasketches-rust).
+It cannot read `HLL_COUNT` sketches, and `HLL_COUNT` sketches cannot be turned into theta
+sketches.
+
 `APPROX_QUANTILES`, `APPROX_TOP_COUNT/SUM` and `APPROX_COUNT_DISTINCT` compute over rows at query
 time and store no sketch, so there is nothing to port. A consumer that serves them computes them
 itself (for example with KLL or exactly) and cannot expect to match BigQuery's unspecified
@@ -130,9 +122,6 @@ internal results.
 
 ## Alternatives
 
-- **One crate for every BigQuery sketch, including DataSketches:** rejected. It would duplicate
-  Apache's maintained port and its format work. A parity suite gives users the same assurance at a
-  fraction of the cost.
 - **Skip KLL entirely:** possible if no consumer needs stored quantile sketches. The spike is cheap
   and settles it.
 - **Byte parity as the only KLL target:** likely unreachable after merges because of randomness.
@@ -142,8 +131,7 @@ internal results.
 
 1. Port the Java unit tests and add the API conveniences (items 1 and 2), one PR.
 2. KLL spike (item 3), reported as a `docs/findings/` file before any KLL API is published.
-3. DataSketches theta parity suite (item 4), then the others on demand.
-4. Items 5 and 6 when a consumer or a maintainer response justifies them.
+3. Items 4 and 5 when a consumer or a maintainer response justifies them.
 
 ## Verification
 
@@ -151,6 +139,4 @@ internal results.
 - Item 2: doctests and unit tests for each new accessor.
 - Item 3: the spike's finding shows exact `EXTRACT` on synthetic single sketches, and a measured
   answer on whether merges are byte-reproducible.
-- Item 4: datasketches-rust estimates and set operations equal the `bqutil.datasketches` UDF
-  outputs on synthetic fixtures.
-- Item 5: `cargo bench --bench fold` improves on sparse inputs with `tests/accumulator.rs` still green.
+- Item 4: `cargo bench --bench fold` improves on sparse inputs with `tests/accumulator.rs` still green.

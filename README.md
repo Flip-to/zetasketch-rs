@@ -85,7 +85,6 @@ Planned work, ranked by priority and risk, is in
 - port Java ZetaSketch's own unit tests;
 - API conveniences;
 - native BigQuery KLL quantiles (`KLL_QUANTILES`), with a feasibility spike first;
-- a BigQuery parity suite for Apache DataSketches (Theta, CPC, ...);
 - faster sparse folds;
 - reporting the Java downgrade bug upstream.
 
