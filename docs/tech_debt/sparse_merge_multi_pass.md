@@ -3,7 +3,7 @@ status: paid
 area: merge
 impact: low
 effort: s
-paid_by: Flip-to/zetasketch-rs#PR
+paid_by: Flip-to/zetasketch-rs#8
 ---
 
 # `Accumulator` sparse merges make three passes over the union

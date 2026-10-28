@@ -22,7 +22,7 @@ Changes from the debt audit:
 | Step | Who | Why | Evidence | When |
 |---|---|---|---|---|
 | Asked | Developer: Yuri Olive | Keep improving: remaining performance work and tech debt | chat request "go ahead and keep working and improving" | 2026-10-28 |
-| Built | Agent: Claude (session 8b72ee89-5aeb-409a-b8be-e395357ed26a), approved by Yuri Olive | `estimate` stays `&mut` (`docs/decisions/20261028_estimate_takes_mut_for_java_parity.md`); the dense sum stays sequential (`docs/decisions/20261028_dense_estimate_sequential_sum.md`) | branch `release/0.2.0-cleanup` | 2026-10-28 |
+| Built | Agent: Claude (session 8b72ee89-5aeb-409a-b8be-e395357ed26a), approved by Yuri Olive | `estimate` stays `&mut` (`docs/decisions/20261028_estimate_takes_mut_for_java_parity.md`); the dense sum stays sequential (`docs/decisions/20261028_dense_estimate_sequential_sum.md`) | https://github.com/Flip-to/zetasketch-rs/pull/8 | 2026-10-28 |
 | Proven | Agent: Claude (session 8b72ee89-5aeb-409a-b8be-e395357ed26a), approved by Yuri Olive | L2: all parity suites unchanged and green, new unit test for the oversized-sparse serialize path, bias tables regenerate identically from Java `d098c49` | local `cargo test --release`, `cargo doc` with `-D warnings`, `cargo package`, 2026-10-28; CI pending | 2026-10-28 |
 | Reviewed | Reviewer: Yuri Olive | | pending: PR review | |
 | Shipped | Developer: Yuri Olive | | pending: merge, then tag v0.2.0 | |
