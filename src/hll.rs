@@ -311,6 +311,26 @@ impl HyperLogLogPlusPlus {
         self.state.num_values
     }
 
+    /// The value kind this sketch accepts, or `None` while it accepts any kind (a sketch decoded
+    /// without a value type, before its first add).
+    #[must_use]
+    pub fn value_kind(&self) -> Option<ValueKind> {
+        match self.allowed {
+            TYPE_LONG => Some(ValueKind::Long),
+            TYPE_INTEGER => Some(ValueKind::Integer),
+            TYPE_ALL => None,
+            _ => Some(ValueKind::BytesOrString),
+        }
+    }
+
+    /// Approximate one-standard-deviation relative error of the dense estimator at this
+    /// sketch's normal precision: `1.04 / sqrt(2^p)` (HLL paper), for example about 0.57% at
+    /// p = 15. Sparse sketches (small cardinalities) are more accurate than this bound.
+    #[must_use]
+    pub fn standard_error(&self) -> f64 {
+        1.04 / f64::from(1i32 << self.state.precision).sqrt()
+    }
+
     /// True while the sketch is in its sparse representation.
     #[must_use]
     pub fn is_sparse(&self) -> bool {
@@ -467,6 +487,25 @@ impl HyperLogLogPlusPlus {
             return Ok(());
         }
         self.merge(Self::from_bytes(bytes)?)
+    }
+
+    /// Like [`merge`](Self::merge), but leaves `other` untouched (Java's `merge` semantics). Costs
+    /// one clone of `other`. To fold many sketches, use [`Accumulator`](crate::Accumulator).
+    ///
+    /// # Errors
+    /// Same as [`merge`](Self::merge).
+    pub fn merge_ref(&mut self, other: &HyperLogLogPlusPlus) -> Result<()> {
+        self.merge(other.clone())
+    }
+
+    /// True when adds are buffered and not yet flushed into the sparse stream.
+    pub(crate) fn has_buffered_values(&self) -> bool {
+        matches!(&self.mode, Mode::Sparse(buf) if !buf.values.is_empty())
+    }
+
+    /// Borrowed view of the current state (no buffered values are included).
+    pub(crate) fn state_view(&self) -> StateView<'_> {
+        self.state.view()
     }
 
     /// Merges `other` into `self`. The result has the lower of each precision.

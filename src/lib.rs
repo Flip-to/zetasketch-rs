@@ -23,6 +23,8 @@ mod error;
 mod estimate;
 pub mod hash;
 mod hll;
+#[cfg(test)]
+mod java_internal_tests;
 mod proto;
 
 pub use accumulator::Accumulator;

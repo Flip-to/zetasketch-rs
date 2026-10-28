@@ -5,7 +5,7 @@
 mod common;
 
 use common::{b64_decode, b64_encode, rows};
-use zetasketch::{Accumulator, HyperLogLogPlusPlus};
+use zetasketch::{Accumulator, HyperLogLogPlusPlus, ValueKind};
 
 const CORPUS: &str = include_str!("data/golden_corpus.tsv");
 const BIGQUERY: &str = include_str!("data/bigquery_golden.tsv");
@@ -204,4 +204,95 @@ fn incompatible_type_is_rejected_without_change() {
     let before = acc.serialize();
     assert!(acc.add_bytes(&strings.serialize()).is_err());
     assert_eq!(acc.serialize(), before);
+}
+
+/// Builds `count` in-memory INT64 sketches; `flush` decides whether each is serialized first
+/// (which compacts its add-buffer) or left with unflushed adds.
+fn in_memory_sketches(rng: &mut Rng, count: usize, flush: bool) -> Vec<HyperLogLogPlusPlus> {
+    (0..count)
+        .map(|_| {
+            let p = [10, 12, 15][rng.below(3) as usize];
+            let mut s = HyperLogLogPlusPlus::for_longs(p).unwrap();
+            let start = rng.below(40_000) as i64;
+            for v in start..start + rng.size(6_000) as i64 {
+                s.add_long(v).unwrap();
+            }
+            if flush {
+                let _ = s.serialize();
+            }
+            s
+        })
+        .collect()
+}
+
+/// `add_sketch` equals the reference fold (`merge_ref`) on in-memory sketches, with and without
+/// unflushed add-buffers, across precisions (fast path, buffered fallback, mixed-precision
+/// fallback).
+#[test]
+fn add_sketch_matches_reference_merge() {
+    let mut rng = Rng(0xadd5_ce7c);
+    let mut acc = Accumulator::new();
+    for round in 0..120 {
+        let flush = round % 2 == 0;
+        let k = 1 + rng.below(8) as usize;
+        let sketches = in_memory_sketches(&mut rng, k, flush);
+
+        let mut reference = sketches[0].clone();
+        for s in &sketches[1..] {
+            reference.merge_ref(s).unwrap();
+        }
+        acc.reset();
+        for s in &sketches {
+            acc.add_sketch(s).unwrap();
+        }
+        let card = acc.cardinality();
+        assert_eq!(card, reference.cardinality(), "round {round} flush={flush}");
+        assert_eq!(
+            acc.estimate(),
+            reference.estimate(),
+            "round {round} flush={flush}"
+        );
+        assert_eq!(acc.num_values(), reference.num_values(), "round {round}");
+        assert_eq!(
+            acc.serialize().unwrap(),
+            reference.serialize(),
+            "round {round} flush={flush}"
+        );
+    }
+}
+
+#[test]
+fn merge_ref_leaves_other_unchanged_and_equals_merge() {
+    let mut rng = Rng(0x0e1f);
+    for _ in 0..50 {
+        let s = in_memory_sketches(&mut rng, 2, false);
+        let other_before = s[1].clone().serialize();
+        let mut by_ref = s[0].clone();
+        by_ref.merge_ref(&s[1]).unwrap();
+        let mut by_value = s[0].clone();
+        by_value.merge(s[1].clone()).unwrap();
+        assert_eq!(by_ref.serialize(), by_value.serialize());
+        assert_eq!(s[1].clone().serialize(), other_before);
+    }
+}
+
+#[test]
+fn value_kind_standard_error_and_precisions() {
+    let mut longs = HyperLogLogPlusPlus::for_longs(15).unwrap();
+    assert_eq!(longs.value_kind(), Some(ValueKind::Long));
+    assert!((longs.standard_error() - 1.04 / 181.019_335_983_756_2).abs() < 1e-12);
+    assert_eq!(
+        HyperLogLogPlusPlus::for_strings(12).unwrap().value_kind(),
+        Some(ValueKind::BytesOrString)
+    );
+    assert_eq!(
+        HyperLogLogPlusPlus::for_integers(10).unwrap().value_kind(),
+        Some(ValueKind::Integer)
+    );
+
+    let mut acc = Accumulator::new();
+    assert_eq!(acc.precisions(), None);
+    longs.add_long(1).unwrap();
+    acc.add_bytes(&longs.serialize()).unwrap();
+    assert_eq!(acc.precisions(), Some((15, 20)));
 }
