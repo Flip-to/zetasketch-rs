@@ -33,5 +33,5 @@ Changes from the debt audit:
 - [x] non_exhaustive enums, version 0.2.0, CHANGELOG
 - [x] Allocation-free `estimate_bias`; `serialize` without the register copy
 - [x] CI: `cargo doc -D warnings`, `cargo package`, bias-table drift; nightly fuzz with corpus
-- [ ] `docs/tech_debt/sparse_merge_multi_pass.md`
+- [x] `docs/tech_debt/sparse_merge_multi_pass.md` (paid: fused single pass)
 - [ ] `docs/tech_debt/mixed_precision_fallback_path.md`

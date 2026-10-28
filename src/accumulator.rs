@@ -14,7 +14,7 @@
 use crate::encoding::{self, Sparse};
 use crate::error::{Error, Result};
 use crate::hll::{self, HyperLogLogPlusPlus};
-use crate::proto::{varint_len, State, StateView, HYPERLOGLOG_PLUS_UNIQUE};
+use crate::proto::{State, StateView, HYPERLOGLOG_PLUS_UNIQUE};
 
 /// Reusable accumulator for merging many serialized sketches.
 ///
@@ -42,6 +42,8 @@ pub struct Accumulator {
     sparse_precision: i32,
     /// Java `sparse_size` field: the first input's value until a sparse merge rewrites it.
     sparse_size: i32,
+    /// Difference-encoded byte length of `sparse`, kept current across merges.
+    sparse_bytes: usize,
     dense: bool,
     registers: Vec<u8>,
     sparse: Vec<u32>,
@@ -164,6 +166,23 @@ impl Accumulator {
         }
     }
 
+    /// [`estimate`](Self::estimate) through a shared reference: the same value, with no
+    /// mutation. Use it to read cached results.
+    #[must_use]
+    pub fn cardinality(&self) -> i64 {
+        if let Some(f) = &self.fallback {
+            return f.cardinality();
+        }
+        if !self.started {
+            return 0;
+        }
+        if self.dense {
+            hll::dense_estimate(&self.registers, self.precision)
+        } else {
+            hll::sparse_estimate(self.sparse_precision, self.sparse_size)
+        }
+    }
+
     /// The accumulated sketch, or `None` when nothing was added.
     ///
     /// # Panics
@@ -253,6 +272,7 @@ impl Accumulator {
         } else {
             self.dense = false;
             std::mem::swap(&mut self.sparse, &mut self.incoming);
+            self.sparse_bytes = view.sparse_data.map_or(0, <[u8]>::len);
         }
     }
 
@@ -269,24 +289,25 @@ impl Accumulator {
         self.sparse_size = 0;
     }
 
-    /// TECH_DEBT(sparse_merge_multi_pass): merge, dedupe and byte count are three passes.
-    ///
     /// Java sparse + sparse merge: sorted union, dedupe, then normalize if the encoded stream
     /// reaches `0.75 * 2^p` bytes.
     fn merge_sparse(&mut self) {
         let enc = self.encoding();
-        encoding::merge_sorted_into(&self.sparse, &self.incoming, &mut self.merged);
-        enc.dedupe_in_place(&mut self.merged);
-        std::mem::swap(&mut self.sparse, &mut self.merged);
-        self.sparse_size = self.sparse.len() as i32;
-
-        let mut bytes = 0usize;
-        let mut last = 0u32;
-        for &v in &self.sparse {
-            bytes += varint_len(v - last);
-            last = v;
+        // A few values into a big union: insert in place. Otherwise one full merge pass.
+        if self.incoming.len() * 16 <= self.sparse.len() {
+            encoding::insert_dedupe(
+                enc,
+                &mut self.sparse,
+                &self.incoming,
+                &mut self.sparse_bytes,
+            );
+        } else {
+            self.sparse_bytes =
+                encoding::merge_dedupe_into(enc, &self.sparse, &self.incoming, &mut self.merged);
+            std::mem::swap(&mut self.sparse, &mut self.merged);
         }
-        if bytes >= self.max_sparse_bytes() {
+        self.sparse_size = self.sparse.len() as i32;
+        if self.sparse_bytes >= self.max_sparse_bytes() {
             self.densify();
         }
     }

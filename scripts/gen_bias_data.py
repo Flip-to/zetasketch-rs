@@ -1,6 +1,6 @@
 """Generate src/bias_data.rs from ZetaSketch Java `Data.java` (Apache-2.0).
 
-    python scripts/gen_bias_data.py <path/to/zetasketch/java/.../hllplus/Data.java>
+python scripts/gen_bias_data.py <path/to/zetasketch/java/.../hllplus/Data.java>
 """
 
 from __future__ import annotations

@@ -1,9 +1,9 @@
 ---
-status: open
+status: paid
 area: merge
 impact: low
 effort: s
-bean: zetasketch-rs-0003
+paid_by: Flip-to/zetasketch-rs#PR
 ---
 
 # `Accumulator` sparse merges make three passes over the union
@@ -30,6 +30,9 @@ does not dominate there.
 One fused loop: merge, dedupe and count the varint bytes in a single pass. Guarded by
 `tests/accumulator.rs` and the `differential_fold` fuzz target.
 
+Done: `encoding::merge_dedupe_into`. A unit test checks it against the three-pass version
+on 1,500 random merges across five precision pairs. See the bench numbers in the PR.
+
 ## Workaround meanwhile
 
-None needed. Correctness is unaffected.
+n/a: paid.

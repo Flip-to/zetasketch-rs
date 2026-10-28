@@ -11,9 +11,21 @@ All notable changes to this crate. The format follows
 - `Error` and `ValueKind` are `#[non_exhaustive]`, so future variants won't break `match`es.
   Add a `_ =>` arm.
 
+### Added
+
+- `HyperLogLogPlusPlus::cardinality(&self)` and `Accumulator::cardinality(&self)`: the current
+  estimate through a shared reference, for cached and concurrently read results. The value equals
+  `estimate()`.
+
 ### Performance
 
+- `Accumulator` folds of many small sparse sketches insert the new values in place instead of
+  rewriting the union: 18.2 to 1.37 us per sketch on the sparse-heavy bench (31.6x faster than
+  the reference fold, which before this was 2.6x).
+
 - Bias correction no longer allocates (one heap allocation saved per dense estimate).
+- `Accumulator` sparse + sparse merges run in one fused pass (merge, dedupe, byte count) instead
+  of three.
 - `Accumulator::serialize` writes straight from its buffers, with no 32 KiB register copy and no
   re-validation.
 

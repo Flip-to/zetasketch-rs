@@ -412,6 +412,34 @@ impl HyperLogLogPlusPlus {
         )
     }
 
+    /// The value [`estimate`](Self::estimate) would return right now, without changing the
+    /// sketch, so it works through a shared reference (cached results, `Arc`, concurrent reads).
+    ///
+    /// `estimate` also flushes the sparse add-buffer, as Java does. That flush can change *later*
+    /// behavior on interleaved add/estimate sequences
+    /// (DECISION(estimate_takes_mut_for_java_parity)), never the value returned. Use
+    /// `cardinality` for anything that is only read.
+    #[must_use]
+    pub fn cardinality(&self) -> i64 {
+        match &self.mode {
+            Mode::Sparse(buf) if !buf.values.is_empty() => {
+                // What the flush would write: dedupe(stored + buffer). Stored data was validated.
+                let merged = sorted_values(&self.state, buf)
+                    .ok()
+                    .flatten()
+                    .unwrap_or_default();
+                let size = self.sparse_encoding().dedupe(&merged).len();
+                sparse_estimate(self.state.sparse_precision, size as i32)
+            }
+            Mode::Sparse(_) => sparse_estimate(self.state.sparse_precision, self.state.sparse_size),
+            Mode::Normal if !self.state.has_data() => 0,
+            Mode::Normal => dense_estimate(
+                self.state.data.as_deref().unwrap_or(&[]),
+                self.state.precision,
+            ),
+        }
+    }
+
     /// Serializes to `AggregatorStateProto` bytes, identical to ZetaSketch Java
     /// `serializeToByteArray()` and BigQuery `HLL_COUNT.MERGE_PARTIAL` output.
     pub fn serialize(&mut self) -> Vec<u8> {

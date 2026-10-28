@@ -48,6 +48,8 @@ cargo fmt --check
 uv run scripts/check_docs_layout.py [--write-index]   # docs/decisions/tech_debt/beans guard
 uv run scripts/gen_bigquery_fixtures.py --project <p> # refresh BigQuery fixtures
 cargo bench --bench fold                              # fold throughput
+uvx ruff check scripts && uvx ruff format --check scripts  # Python script lint/format (ruff.toml)
+cargo llvm-cov --release --summary-only               # coverage (CI posts it to the job summary)
 cd fuzz && cargo +nightly fuzz run differential_fold  # differential fuzzing (Linux/macOS)
 ```
 

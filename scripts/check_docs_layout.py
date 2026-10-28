@@ -129,7 +129,9 @@ def check_specs(repo: Path) -> list[str]:
             continue
         body = p.read_text(encoding="utf-8").split("---", 2)[2]
         if BODY_STATUS_RE.search(body):
-            out.append(f"{rel}: status lives in frontmatter only; remove the Status line from the body")
+            out.append(
+                f"{rel}: status lives in frontmatter only; remove the Status line from the body"
+            )
         headings = set(re.findall(r"^## (.+?)\s*$", body, re.MULTILINE))
         missing = [s for s in SPEC_SECTIONS if s not in headings]
         if missing:
@@ -272,7 +274,9 @@ def check_beans(repo: Path) -> list[str]:
             for step in ("Shipped", "Verified"):
                 ev = rows[step][2]
                 if not ev or ev.lower() in ("pending", "n/a"):
-                    out.append(f"{rel}: A2V {step} needs evidence, 'pending: <issue>' or 'n/a: <reason>'")
+                    out.append(
+                        f"{rel}: A2V {step} needs evidence, 'pending: <issue>' or 'n/a: <reason>'"
+                    )
     return out
 
 
@@ -292,7 +296,9 @@ def markers(repo: Path, pattern: re.Pattern = MARKER_RE) -> dict[str, list[str]]
         for p in sorted(base.rglob("*")):
             if not p.is_file() or p.suffix not in MARKER_SUFFIXES or p.name in MARKER_SKIP:
                 continue
-            for i, line in enumerate(p.read_text(encoding="utf-8", errors="replace").splitlines(), 1):
+            for i, line in enumerate(
+                p.read_text(encoding="utf-8", errors="replace").splitlines(), 1
+            ):
                 for slug in pattern.findall(line):
                     found.setdefault(slug, []).append(f"{p.relative_to(repo).as_posix()}:{i}")
     return found
@@ -326,7 +332,11 @@ def render_index(items: dict[str, dict]) -> str:
             kv[0],
         ),
     )
-    lines = [INDEX_HEADER, "| Item | Status | Impact | Effort | Area | Bean |", "|---|---|---|---|---|---|"]
+    lines = [
+        INDEX_HEADER,
+        "| Item | Status | Impact | Effort | Area | Bean |",
+        "|---|---|---|---|---|---|",
+    ]
     for slug, fm in rows:
         lines.append(
             f"| [{slug}]({slug}.md) | {fm.get('status', '')} | {fm.get('impact', '')} | "
@@ -340,7 +350,9 @@ def render_dated_index(repo: Path, sub: str, heading: str) -> str:
     for p in reversed(doc_files(repo / "docs" / sub)):
         fm = frontmatter(p) or {}
         d = p.name[:8]
-        lines.append(f"| {d[:4]}-{d[4:6]}-{d[6:]} | [{title(p)}]({p.name}) | {fm.get('status', '')} |")
+        lines.append(
+            f"| {d[:4]}-{d[4:6]}-{d[6:]} | [{title(p)}]({p.name}) | {fm.get('status', '')} |"
+        )
     return "\n".join(lines) + "\n"
 
 
@@ -348,7 +360,9 @@ def indexes(repo: Path) -> dict[str, str | None]:
     items = debt_items(repo)
     out: dict[str, str | None] = {"tech_debt": render_index(items) if items else None}
     for sub, heading in (("specs", "Spec index"), ("decisions", "Decision index")):
-        out[sub] = render_dated_index(repo, sub, heading) if doc_files(repo / "docs" / sub) else None
+        out[sub] = (
+            render_dated_index(repo, sub, heading) if doc_files(repo / "docs" / sub) else None
+        )
     return out
 
 
@@ -359,7 +373,9 @@ def check_index(repo: Path) -> list[str]:
         if expected is None and not index.exists():
             continue
         if not index.exists() or index.read_text(encoding="utf-8") != expected:
-            out.append(f"docs/{sub}/README.md: stale; run scripts/check_docs_layout.py --write-index")
+            out.append(
+                f"docs/{sub}/README.md: stale; run scripts/check_docs_layout.py --write-index"
+            )
     return out
 
 

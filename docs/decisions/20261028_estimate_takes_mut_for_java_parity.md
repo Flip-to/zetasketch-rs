@@ -32,14 +32,15 @@ estimate flushed. Matching Java on such sequences requires the mutation.
 
 - `estimate(&self)` computing on a copy: breaks parity on interleaved add/estimate sequences, as
   above.
-- Both methods (`estimate` plus a `&self` `peek_estimate`): possible later if a caller needs
-  shared access. For results that are only read, `Accumulator::serialize(&self)` plus a decode
-  already works.
+- **Both methods (adopted alongside this decision):** `cardinality(&self)` returns the same value
+  `estimate` would, computed without the flush, so cached results can be read through a shared
+  reference. `estimate(&mut self)` stays for exact Java behavior on interleaved add/estimate
+  sequences. A test checks that `cardinality == estimate` at every step of interleaved adds.
 
 ## Impact
 
-Callers that cache results hold them mutably or behind a lock. Revisit if the engine needs
-concurrent reads of one live sketch.
+Callers that cache results read them with `cardinality(&self)`: no lock, no `&mut`. Only code
+that keeps adding to a sketch after estimating needs `estimate(&mut self)`.
 
 ## Who
 

@@ -2,15 +2,19 @@
 //!
 //!     cargo bench --bench fold
 //!
-//! Workload: 2,000 serialized INT64 sketches, 70% sparse (1..2,000 values) and 30% dense
-//! (5,000..50,000 values), folded into one result 20 times. Std-only timing, no criterion.
+//! Workloads, each 2,000 serialized INT64 sketches folded into one result 20 times:
+//!
+//! - mixed: 70% sparse (1..2,000 values), 30% dense (5,000..50,000 values);
+//! - sparse-heavy: 1..12 values each, so the union stays sparse for most of the fold.
+//!
+//! Std-only timing, no criterion.
 
 use std::hint::black_box;
 use std::time::Instant;
 
 use zetasketch::{Accumulator, HyperLogLogPlusPlus};
 
-fn workload() -> Vec<Vec<u8>> {
+fn workload(count: usize, size: impl Fn(usize, u64) -> u64) -> Vec<Vec<u8>> {
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut next = move || {
         seed ^= seed << 13;
@@ -18,13 +22,9 @@ fn workload() -> Vec<Vec<u8>> {
         seed ^= seed << 17;
         seed
     };
-    (0..2_000)
+    (0..count)
         .map(|i| {
-            let n = if i % 10 < 7 {
-                1 + next() % 2_000
-            } else {
-                5_000 + next() % 45_000
-            };
+            let n = size(i, next());
             let start = (next() % 1_000_000) as i64;
             let mut s = HyperLogLogPlusPlus::for_longs(15).unwrap();
             for v in start..start + n as i64 {
@@ -52,16 +52,14 @@ fn time(
     per_sketch
 }
 
-fn main() {
-    let sketches = workload();
+fn run(name: &str, sketches: &[Vec<u8>]) {
     let bytes: usize = sketches.iter().map(Vec::len).sum();
     println!(
-        "{} sketches, {:.1} MiB serialized",
+        "== {name}: {} sketches, {:.1} MiB serialized",
         sketches.len(),
         bytes as f64 / 1_048_576.0
     );
-
-    let reference = time("reference", &sketches, 20, |s| {
+    let reference = time("reference", sketches, 20, |s| {
         let mut acc = HyperLogLogPlusPlus::from_bytes(&s[0]).unwrap();
         for b in &s[1..] {
             acc.merge_bytes(b).unwrap();
@@ -69,7 +67,7 @@ fn main() {
         acc.estimate()
     });
     let mut acc = Accumulator::new();
-    let fast = time("accumulator", &sketches, 20, |s| {
+    let fast = time("accumulator", sketches, 20, |s| {
         acc.reset();
         for b in s {
             acc.add_bytes(b).unwrap();
@@ -77,4 +75,21 @@ fn main() {
         acc.estimate()
     });
     println!("speedup      {:>9.1}x", reference / fast);
+}
+
+fn main() {
+    run(
+        "mixed (70% sparse inputs)",
+        &workload(2_000, |i, r| {
+            if i % 10 < 7 {
+                1 + r % 2_000
+            } else {
+                5_000 + r % 45_000
+            }
+        }),
+    );
+    run(
+        "sparse-heavy (1..12 values each)",
+        &workload(2_000, |_, r| 1 + r % 12),
+    );
 }

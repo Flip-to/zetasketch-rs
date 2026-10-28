@@ -124,7 +124,7 @@ impl Sparse {
     }
 
     #[inline]
-    fn is_rho_encoded(self, v: u32) -> bool {
+    pub(crate) fn is_rho_encoded(self, v: u32) -> bool {
         v & self.rho_encoded_flag != 0
     }
 
@@ -199,32 +199,6 @@ impl Sparse {
         rest < self.rho_encoded_flag
             && (rest >> RHOW_BITS) >> self.normal_precision == 0
             && i32::from(self.decode_normal_rho_w(v)) <= 65 - self.normal_precision
-    }
-
-    /// In-place [`dedupe`](Self::dedupe), for the allocation-free accumulator.
-    pub fn dedupe_in_place(self, values: &mut Vec<u32>) {
-        let mut w = 0;
-        let mut i = 0;
-        while i < values.len() {
-            let next = values[i];
-            i += 1;
-            if self.is_rho_encoded(next) {
-                let sparse_index = self.decode_sparse_index(next);
-                let mut max = next;
-                while i < values.len() && self.decode_sparse_index(values[i]) == sparse_index {
-                    max = values[i];
-                    i += 1;
-                }
-                values[w] = max;
-            } else {
-                while i < values.len() && values[i] == next {
-                    i += 1;
-                }
-                values[w] = next;
-            }
-            w += 1;
-        }
-        values.truncate(w);
     }
 
     /// Collapses a sorted stream so that each sparse index appears once, keeping the largest
@@ -388,6 +362,99 @@ pub(crate) fn encode_sparse(values: &[u32]) -> Vec<u8> {
     out
 }
 
+/// One pass of [`merge_sorted`] then [`Sparse::dedupe`] into `out`. Returns the
+/// difference-encoded byte length of the result (what Java checks against the normalization
+/// threshold). Equal to the three-pass version by construction:
+///
+/// - a non-rho-encoded value only collapses with exact duplicates;
+/// - a rho-encoded group keeps its last (largest) value;
+/// - the two kinds never share a sparse index, because rho-encoded indices have zero low bits.
+pub(crate) fn merge_dedupe_into(enc: Sparse, a: &[u32], b: &[u32], out: &mut Vec<u32>) -> usize {
+    out.clear();
+    out.reserve(a.len() + b.len());
+    let (mut i, mut j) = (0, 0);
+    let mut pending: Option<u32> = None;
+    let mut bytes = 0usize;
+    let mut last = 0u32;
+    while i < a.len() || j < b.len() {
+        let v = if j < b.len() && (i >= a.len() || b[j] < a[i]) {
+            j += 1;
+            b[j - 1]
+        } else {
+            i += 1;
+            a[i - 1]
+        };
+        match pending {
+            Some(p) if enc.is_rho_encoded(p) => {
+                if enc.decode_sparse_index(v) == enc.decode_sparse_index(p) {
+                    pending = Some(v);
+                    continue;
+                }
+            }
+            Some(p) if v == p => continue,
+            _ => {}
+        }
+        if let Some(p) = pending {
+            bytes += crate::proto::varint_len(p - last);
+            last = p;
+            out.push(p);
+        }
+        pending = Some(v);
+    }
+    if let Some(p) = pending {
+        bytes += crate::proto::varint_len(p - last);
+        out.push(p);
+    }
+    bytes
+}
+
+/// Inserts the ascending values `incoming` into `union`, which must already be deduped,
+/// with the same result as [`merge_dedupe_into`]. `bytes` is the difference-encoded length of
+/// `union` and is kept up to date by adjusting only the gaps next to each changed value.
+/// Costs O(k log n) comparisons plus one `memmove` per new value, against O(n + k) for a full
+/// merge, so it wins when `incoming` is small next to `union`.
+pub(crate) fn insert_dedupe(
+    enc: Sparse,
+    union: &mut Vec<u32>,
+    incoming: &[u32],
+    bytes: &mut usize,
+) {
+    #[inline]
+    fn gap(prev: Option<u32>, cur: u32) -> usize {
+        crate::proto::varint_len(cur - prev.unwrap_or(0))
+    }
+    for &v in incoming {
+        // A rho-encoded group shares every bit above the 6-bit rhoW', so it is the range
+        // [v & !63, v | 63]. A plain sparse index only collapses with an exact duplicate.
+        let (lo, encoded) = if enc.is_rho_encoded(v) {
+            (v & !63, true)
+        } else {
+            (v, false)
+        };
+        let pos = union.partition_point(|&x| x < lo);
+        let prev = pos.checked_sub(1).map(|i| union[i]);
+        if let Some(&e) = union.get(pos) {
+            let same = if encoded { e & !63 == lo } else { e == v };
+            if same {
+                if encoded && v > e {
+                    let next = union.get(pos + 1).copied();
+                    *bytes -= gap(prev, e) + next.map_or(0, |n| gap(Some(e), n));
+                    *bytes += gap(prev, v) + next.map_or(0, |n| gap(Some(v), n));
+                    union[pos] = v;
+                }
+                continue;
+            }
+        }
+        let next = union.get(pos).copied();
+        if let Some(n) = next {
+            *bytes -= gap(prev, n);
+            *bytes += gap(Some(v), n);
+        }
+        *bytes += gap(prev, v);
+        union.insert(pos, v);
+    }
+}
+
 /// Merges two ascending sequences (Java `MergedIntIterator`; ties take `a` first).
 pub(crate) fn merge_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
     let mut out = Vec::new();
@@ -407,6 +474,48 @@ pub(crate) fn merge_sorted_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
         } else {
             out.push(a[i]);
             i += 1;
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn three_pass(enc: Sparse, a: &[u32], b: &[u32]) -> (Vec<u32>, usize) {
+        let merged = enc.dedupe(&merge_sorted(a, b));
+        let bytes = encode_sparse(&merged).len();
+        (merged, bytes)
+    }
+
+    #[test]
+    fn fused_merge_dedupe_matches_three_pass() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for (p, sp) in [(10, 15), (12, 17), (15, 20), (15, 15), (4, 25)] {
+            let enc = Sparse::new(p, sp);
+            for _ in 0..300 {
+                let (na, nb) = (next() % 400, next() % 400);
+                let mut a: Vec<u32> = (0..na).map(|_| enc.encode_hash(next())).collect();
+                let mut b: Vec<u32> = (0..nb).map(|_| enc.encode_hash(next())).collect();
+                a.sort_unstable();
+                b.sort_unstable();
+                let mut out = Vec::new();
+                let bytes = merge_dedupe_into(enc, &a, &b, &mut out);
+                let expected = three_pass(enc, &a, &b);
+                assert_eq!((out, bytes), expected, "p={p} sp={sp}");
+
+                // In-place insertion into the deduped `a` must agree too.
+                let mut union = enc.dedupe(&a);
+                let mut union_bytes = encode_sparse(&union).len();
+                insert_dedupe(enc, &mut union, &b, &mut union_bytes);
+                assert_eq!((union, union_bytes), expected, "insert p={p} sp={sp}");
+            }
         }
     }
 }
