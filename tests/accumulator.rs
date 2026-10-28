@@ -12,8 +12,10 @@ const BIGQUERY: &str = include_str!("data/bigquery_golden.tsv");
 
 /// Reference fold: the first input decoded, the rest merged in order.
 fn reference_fold(inputs: &[Vec<u8>]) -> (Vec<u8>, i64, i64) {
-    let mut acc = HyperLogLogPlusPlus::from_bytes(&inputs[0]).unwrap();
-    for b in &inputs[1..] {
+    // Empty inputs (NULL sketches) are skipped, as merge_bytes and HLL_COUNT.MERGE do.
+    let mut it = inputs.iter().filter(|b| !b.is_empty());
+    let mut acc = HyperLogLogPlusPlus::from_bytes(it.next().unwrap()).unwrap();
+    for b in it {
         acc.merge_bytes(b).unwrap();
     }
     // Estimate before serialize: serialize() compacts a buffered sparse sketch, which can move
@@ -54,7 +56,7 @@ fn golden_merges() {
         );
         n += 1;
     }
-    assert_eq!(n, 21);
+    assert!(n >= 40, "only {n} merges");
 }
 
 #[test]
