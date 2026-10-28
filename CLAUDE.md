@@ -65,6 +65,9 @@ cd fuzz && cargo +nightly fuzz run differential_fold  # differential fuzzing (Li
   `tests/accumulator.rs` green. Inputs it cannot handle exactly go to the reference fallback.
 - Decoding rejects out-of-range input; nothing on a public path may panic
   (`tests/robustness.rs`). Count arithmetic wraps like Java's `long`.
+- `estimate()` takes `&mut self` and the dense estimate sums in register order. Both are
+  needed for exact parity; see the decisions in `docs/decisions/`.
+- Public enums are `#[non_exhaustive]`. Keep any new public enum that way.
 - `src/bias_data.rs` is generated. Change `scripts/gen_bias_data.py`, never the output.
 - Shifts that can reach the type width use `wrapping_shl`, because Java masks shift amounts.
 

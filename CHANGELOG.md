@@ -1,0 +1,33 @@
+# Changelog
+
+All notable changes to this crate. The format follows
+[Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
+[SemVer](https://semver.org/) (pre-1.0: a minor bump may break the API).
+
+## [0.2.0] - unreleased
+
+### Changed (breaking)
+
+- `Error` and `ValueKind` are `#[non_exhaustive]`, so future variants won't break `match`es.
+  Add a `_ =>` arm.
+
+### Performance
+
+- Bias correction no longer allocates (one heap allocation saved per dense estimate).
+- `Accumulator::serialize` writes straight from its buffers, with no 32 KiB register copy and no
+  re-validation.
+
+### Internal
+
+- CI checks `cargo doc` with warnings denied, `cargo package`, and that `src/bias_data.rs`
+  regenerates byte for byte from Java ZetaSketch `Data.java` at the pinned commit `d098c49`.
+- A nightly fuzz workflow (15 min per target) keeps its corpus between runs.
+
+## [0.1.0] - 2026-10-28
+
+First release:
+
+- `HyperLogLogPlusPlus`: decode, merge, estimate, serialize and add, byte-compatible with Java
+  ZetaSketch and BigQuery `HLL_COUNT`;
+- `Accumulator` for fast folds;
+- parity suites against the Java golden corpus and BigQuery fixtures built from synthetic inputs.

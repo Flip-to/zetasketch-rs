@@ -2,6 +2,7 @@ use std::fmt;
 
 /// Errors raised while decoding, validating, adding to or merging sketches.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Error {
     /// The bytes are not a well-formed `AggregatorStateProto`.
     Proto(&'static str),

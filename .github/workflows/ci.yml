@@ -71,6 +71,20 @@ jobs:
           key: cargo-${{ runner.os }}-lint-${{ hashFiles('Cargo.lock') }}
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
+      - name: Docs build without warnings
+        run: cargo doc --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      - name: Package (what crates.io would receive)
+        run: cargo package --locked
+      - name: Bias tables match Java ZetaSketch Data.java (pinned commit)
+        run: |
+          git init -q /tmp/zetasketch
+          git -C /tmp/zetasketch fetch -q --depth 1 https://github.com/google/zetasketch.git d098c49efb5a5bc70eec89c028a38b14b930ca98
+          git -C /tmp/zetasketch checkout -q FETCH_HEAD
+          python3 scripts/gen_bias_data.py /tmp/zetasketch/java/com/google/zetasketch/internal/hllplus/Data.java
+          rustfmt --edition 2021 src/bias_data.rs
+          git diff --exit-code -- src/bias_data.rs
       - uses: astral-sh/setup-uv@v7
         with:
           cache-dependency-glob: scripts/*.py

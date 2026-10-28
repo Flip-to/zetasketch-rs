@@ -40,6 +40,7 @@ const TYPE_ALL: u8 = TYPE_LONG | TYPE_INTEGER | TYPE_STRING | TYPE_BYTES;
 /// Kind of value a sketch accepts. A sketch decoded from bytes without a value type accepts any
 /// kind until the first value is added.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum ValueKind {
     /// 64-bit integers (BigQuery `INT64`).
     Long,
@@ -157,7 +158,8 @@ pub(crate) fn validate_header(view: &StateView<'_>) -> Result<u8> {
     Ok(allowed)
 }
 
-/// HLL++ estimate over dense registers (Java `NormalRepresentation.estimate`).
+/// HLL++ estimate over dense registers (Java `NormalRepresentation.estimate`). Sums in register
+/// order on purpose: DECISION(dense_estimate_sequential_sum).
 pub(crate) fn dense_estimate(data: &[u8], p: i32) -> i64 {
     let mut num_zeros = 0u32;
     let mut sum = 0.0f64;
@@ -390,6 +392,9 @@ impl HyperLogLogPlusPlus {
 
     // ---- results -------------------------------------------------------------------------
 
+    /// Takes `&mut self`: a sparse sketch flushes its buffer first, as Java does
+    /// (DECISION(estimate_takes_mut_for_java_parity)).
+    ///
     /// Cardinality estimate, identical to ZetaSketch Java `longResult()` and BigQuery
     /// `HLL_COUNT.EXTRACT`.
     pub fn estimate(&mut self) -> i64 {

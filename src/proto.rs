@@ -176,7 +176,16 @@ impl State {
     }
 
     pub fn to_bytes(&self) -> Vec<u8> {
-        let mut hll = Vec::new();
+        self.view().encode()
+    }
+}
+
+impl StateView<'_> {
+    /// Java `State.writeTo`: the serialized sketch.
+    pub fn encode(self) -> Vec<u8> {
+        let mut hll = Vec::with_capacity(
+            self.data.map_or(0, <[u8]>::len) + self.sparse_data.map_or(0, <[u8]>::len) + 32,
+        );
         if self.sparse_size != 0 {
             put_varint(&mut hll, u64::from(SPARSE_SIZE_TAG));
             put_int32(&mut hll, self.sparse_size);
@@ -189,12 +198,12 @@ impl State {
             put_varint(&mut hll, u64::from(SPARSE_PRECISION_TAG));
             put_int32(&mut hll, self.sparse_precision);
         }
-        if let Some(data) = &self.data {
+        if let Some(data) = self.data {
             put_varint(&mut hll, u64::from(DATA_TAG));
             put_varint(&mut hll, data.len() as u64);
             hll.extend_from_slice(data);
         }
-        if let Some(sparse) = &self.sparse_data {
+        if let Some(sparse) = self.sparse_data {
             put_varint(&mut hll, u64::from(SPARSE_DATA_TAG));
             put_varint(&mut hll, sparse.len() as u64);
             hll.extend_from_slice(sparse);
