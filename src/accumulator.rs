@@ -74,6 +74,17 @@ impl Accumulator {
         !self.started && self.fallback.is_none()
     }
 
+    /// Normal and sparse precision of the result, or `None` when nothing was added.
+    #[must_use]
+    pub fn precisions(&self) -> Option<(i32, i32)> {
+        match &self.fallback {
+            Some(f) => Some((f.normal_precision(), f.sparse_precision())),
+            None => self
+                .started
+                .then_some((self.precision, self.sparse_precision)),
+        }
+    }
+
     /// Number of values across all added sketches (not distinct).
     #[must_use]
     pub fn num_values(&self) -> i64 {
@@ -98,7 +109,35 @@ impl Accumulator {
         }
         let view = StateView::parse(bytes)?;
         let allowed = hll::validate_header(&view)?;
+        self.add_view(&view, allowed)
+    }
 
+    /// Merges an in-memory sketch, with the same result as `add_bytes(&sketch.serialize())`
+    /// would give in the reference fold (`merge`), but without serializing or copying it.
+    ///
+    /// # Errors
+    /// Incompatible precision or value type. On error the accumulator is unchanged.
+    pub fn add_sketch(&mut self, sketch: &HyperLogLogPlusPlus) -> Result<()> {
+        if let Some(f) = &mut self.fallback {
+            return f.merge_ref(sketch);
+        }
+        if sketch.has_buffered_values() {
+            // Unflushed adds: only the reference merge sees them exactly as Java does.
+            if !self.started {
+                self.fallback = Some(sketch.clone());
+                return Ok(());
+            }
+            let mut f = HyperLogLogPlusPlus::from_state(self.build_state())?;
+            f.merge_ref(sketch)?;
+            self.fallback = Some(f);
+            return Ok(());
+        }
+        let view = sketch.state_view();
+        let allowed = hll::validate_header(&view)?;
+        self.add_view(&view, allowed)
+    }
+
+    fn add_view(&mut self, view: &StateView<'_>, allowed: u8) -> Result<()> {
         let fast = view.sparse_precision != hll::SPARSE_PRECISION_DISABLED
             && !(view.has_data() && view.sparse_data.is_some());
         if !self.started {
@@ -106,8 +145,8 @@ impl Accumulator {
                 self.fallback = Some(HyperLogLogPlusPlus::from_state(view.to_state())?);
                 return Ok(());
             }
-            self.decode_incoming(&view)?;
-            self.start(&view, allowed);
+            self.decode_incoming(view)?;
+            self.start(view, allowed);
             return Ok(());
         }
 
@@ -128,7 +167,7 @@ impl Accumulator {
             self.fallback = Some(f);
             return Ok(());
         }
-        self.decode_incoming(&view)?;
+        self.decode_incoming(view)?;
         self.allowed = types;
         self.num_values = self.num_values.wrapping_add(view.num_values);
 

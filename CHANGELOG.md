@@ -16,6 +16,11 @@ All notable changes to this crate. The format follows
 - `HyperLogLogPlusPlus::cardinality(&self)` and `Accumulator::cardinality(&self)`: the current
   estimate through a shared reference, for cached and concurrently read results. The value equals
   `estimate()`.
+- `Accumulator::add_sketch(&HyperLogLogPlusPlus)`: fold an in-memory sketch without serializing
+  or copying it.
+- `HyperLogLogPlusPlus::merge_ref(&other)`: merge without consuming `other`, like Java's `merge`.
+- `HyperLogLogPlusPlus::value_kind()`, `standard_error()` (1.04 / sqrt(2^p)) and
+  `Accumulator::precisions()`.
 
 ### Performance
 
@@ -30,6 +35,12 @@ All notable changes to this crate. The format follows
   re-validation.
 
 ### Internal
+
+- Ported Java ZetaSketch's own unit tests: 74 public-API tests in
+  `tests/java_hyperloglogplusplus.rs` and 97 internal-module tests in `src/java_internal_tests.rs`.
+  All Java expectations hold. Two tests are named `_differs_from_java` for setup reasons: Rust's
+  sparse encoder only debug-asserts sorted input, and Rust cannot represent a normal sketch with
+  no registers.
 
 - Python tooling is a uv project (`pyproject.toml`, `uv.lock`) with pytest suites in
   `tests/python/`, including checks that the BigQuery generator's value families and edge values

@@ -33,7 +33,7 @@ References:
 
 Planned work, in priority order. Each item becomes its own bean and PR.
 
-### 1. Port Java ZetaSketch's own unit tests
+### 1. Port Java ZetaSketch's own unit tests (done, bean `zetasketch-rs-0004`)
 
 `google/zetasketch` `javatests/` (HEAD `d098c49`, 2026-04-17) has 16 files and about 4,500 lines;
 none are ported yet. The golden-vector suites prove the normal paths byte for byte, but not
@@ -53,7 +53,7 @@ have. Skip the Truth `testing/` subjects: they are Java assertion helpers.
 Each Java assertion that this crate deliberately breaks becomes a named test that documents the
 difference: the buffered-downgrade fix, and the stricter bounds checks at decode.
 
-### 2. API conveniences
+### 2. API conveniences (done, bean `zetasketch-rs-0004`, except the `Aggregator` trait)
 
 | Java | Today | Add |
 |---|---|---|
@@ -136,6 +136,7 @@ internal results.
 ## Verification
 
 - Item 1: all ported Java tests pass, or are named and documented as deliberate differences.
+  Result (2026-10-28): 171 ported, all pass, 0 ignored, 2 `_differs_from_java` (setup only).
 - Item 2: doctests and unit tests for each new accessor.
 - Item 3: the spike's finding shows exact `EXTRACT` on synthetic single sketches, and a measured
   answer on whether merges are byte-reproducible.
