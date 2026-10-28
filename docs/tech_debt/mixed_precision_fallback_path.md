@@ -3,7 +3,7 @@ status: paid
 area: merge
 impact: low
 effort: m
-paid_by: Flip-to/zetasketch-rs#PR
+paid_by: Flip-to/zetasketch-rs#11
 ---
 
 # Mixed-precision folds fell back to the reference implementation
