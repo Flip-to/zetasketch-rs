@@ -36,11 +36,32 @@ ZetaSketch (`DECISION(faithful_port_of_java_reference)`):
   `Math.round`.
 - `hash.rs`: Guava `Fingerprint2011`, so sketches built in Rust match BigQuery.
 
-One deliberate difference. Java's `NormalRepresentation` caches its encoding at construction.
+**Fast fold.** `Accumulator` (`src/accumulator.rs`) folds serialized sketches with the same
+result as the reference fold:
+
+- parsing borrows the input, with no copy;
+- the dense registers and the sparse buffers are reused;
+- sparse input is decoded and validated in one pass, so a rejected input leaves the accumulator
+  unchanged.
+
+The fast path covers inputs that share the first input's precisions and have sparse mode
+enabled. Anything else hands over to the reference implementation for the rest of the fold, so
+the result stays exact.
+
+Deliberate differences from Java, each only where Java throws or corrupts:
+
+1. Java's `NormalRepresentation` caches its encoding at construction.
 After a precision-lowering merge of a sparse sketch into a dense one, the returned object keeps
 the old precision. Later operations would then index out of bounds or read wrongly. Here the
 encoding is always derived from the current state, so the code never reads stale precision. On
 every reachable input that Java handles without error, the output is the same.
+2. When a sparse sketch is downgraded, buffered values are converted from their real encoding.
+   Java misreads them; see `docs/tech_debt/sparse_downgrade_buffer_encoding.md`. BigQuery
+   agrees with the fixed behavior: three lowering-chain fixtures pass.
+3. Corrupt input is rejected at decode instead of failing later. This covers sparse values
+   outside `2^sp` or `2^p`, `rhoW` too large for a register, and register bytes above `65 - p`.
+   `tests/robustness.rs` runs 40,000 mutated or random inputs through every entry point with
+   no panic.
 
 Proof is two golden suites. Both use synthetic data only (`DECISION(synthetic_fixtures_only)`).
 
@@ -60,7 +81,7 @@ Proof is two golden suites. Both use synthetic data only (`DECISION(synthetic_fi
 2. Generate BigQuery fixtures, then green (done).
 3. Publish `Flip-to/zetasketch-rs` as a public repo, CI green, tag `v0.1.0`, publish to crates.io
    (crate name to be confirmed: is `zetasketch` free?).
-4. Hot-path accumulator API for many-sketch merges (`docs/tech_debt/per_sketch_decode_allocation.md`).
+4. Hot-path accumulator for many-sketch merges (done: `Accumulator`, bean `zetasketch-rs-0002`).
 
 ## Verification
 
@@ -69,4 +90,11 @@ Proof is two golden suites. Both use synthetic data only (`DECISION(synthetic_fi
 - `tests/golden_corpus.rs`: 3/3 pass (84 SKETCH, 5 MERGE, 98 LONGS rows, byte-exact).
 - `tests/bigquery_golden.rs`: 3/3 pass (66 INIT decode/estimate/bytes, 66 rebuilt from values,
   13 MERGE with `MERGE_PARTIAL` bytes and `MERGE` estimate).
-- Doctest in `src/hll.rs` passes.
+- `tests/bigquery_golden.rs` after adding the lowering-chain fixtures (2026-10-28): 69 INIT
+  rows, 16 MERGE rows.
+- `tests/accumulator.rs`: 5/5 pass. Byte, estimate and count equality with the reference fold
+  on 21 golden merges, 300 randomized same-precision folds and 150 mixed-precision folds.
+- `tests/robustness.rs`: 2/2 pass (40,000 corrupt inputs, no panic, debug and release).
+- `cargo bench --bench fold`: the reference takes 22.0 us per sketch, the accumulator 10.4 us
+  (2.1x).
+- Doctests in `src/hll.rs` and `src/accumulator.rs` pass.

@@ -9,7 +9,7 @@ use crate::encoding::{self, Normal, Sparse};
 use crate::error::{Error, Result};
 use crate::estimate;
 use crate::hash::fingerprint2011;
-use crate::proto::{State, HYPERLOGLOG_PLUS_UNIQUE};
+use crate::proto::{State, StateView, HYPERLOGLOG_PLUS_UNIQUE};
 
 /// Smallest supported normal precision.
 pub const MINIMUM_PRECISION: i32 = 4;
@@ -24,7 +24,7 @@ pub const DEFAULT_SPARSE_PRECISION_DELTA: i32 = 5;
 /// Sparse precision value that disables the sparse representation.
 pub const SPARSE_PRECISION_DISABLED: i32 = 0;
 
-const ENCODING_VERSION: i32 = 2;
+pub(crate) const ENCODING_VERSION: i32 = 2;
 
 const VALUE_TYPE_UNKNOWN: i32 = 0;
 const VALUE_TYPE_UINT32: i32 = 7;
@@ -98,6 +98,93 @@ fn check_sparse_precision(p: i32, sp: i32) -> Result<()> {
             "sparse precision must be in [{p}, {MAXIMUM_SPARSE_PRECISION}] but was {sp}"
         )))
     }
+}
+
+/// Validates a parsed sketch the way the reference constructor does, plus bounds checks that
+/// keep corrupt input from indexing out of range. Returns the allowed value types.
+pub(crate) fn validate(view: &StateView<'_>) -> Result<u8> {
+    let allowed = validate_header(view)?;
+    // Sparse data is read by any later merge or normalization, so check it whenever present.
+    if let Some(sd) = view.sparse_data.filter(|d| !d.is_empty()) {
+        let enc = Sparse::new(view.precision, view.sparse_precision);
+        encoding::decode_validated_into(sd, enc, &mut Vec::new())?;
+    }
+    Ok(allowed)
+}
+
+/// Everything [`validate`] checks except walking the sparse stream. When sparse data is
+/// present the precision pair is checked, so `Sparse::new(p, sp)` is safe to build.
+pub(crate) fn validate_header(view: &StateView<'_>) -> Result<u8> {
+    if view.r#type != HYPERLOGLOG_PLUS_UNIQUE {
+        return Err(Error::InvalidState(format!(
+            "expected type HYPERLOGLOG_PLUS_UNIQUE but was {}",
+            view.r#type
+        )));
+    }
+    if view.encoding_version != ENCODING_VERSION {
+        return Err(Error::InvalidState(format!(
+            "expected encoding version {ENCODING_VERSION} but was {}",
+            view.encoding_version
+        )));
+    }
+    let allowed = allowed_types(view.value_type)?;
+    if view.has_sparse_data() && view.sparse_precision == SPARSE_PRECISION_DISABLED {
+        return Err(Error::InvalidState(
+            "must have a sparse precision when sparse data is set".into(),
+        ));
+    }
+    if view.has_data() || view.sparse_precision == SPARSE_PRECISION_DISABLED {
+        check_normal_precision(view.precision)?;
+        if let Some(data) = view.data.filter(|d| !d.is_empty()) {
+            let want = 1usize << view.precision;
+            if data.len() != want {
+                return Err(Error::InvalidState(format!(
+                    "expected data to consist of exactly {want} bytes but got {}",
+                    data.len()
+                )));
+            }
+            let max = (65 - view.precision) as u8;
+            if data.iter().copied().max().unwrap_or(0) > max {
+                return Err(Error::InvalidState("register value out of range".into()));
+            }
+        }
+    } else {
+        check_sparse_precision(view.precision, view.sparse_precision)?;
+    }
+    if view.has_sparse_data() {
+        check_sparse_precision(view.precision, view.sparse_precision)?;
+    }
+    Ok(allowed)
+}
+
+/// HLL++ estimate over dense registers (Java `NormalRepresentation.estimate`).
+pub(crate) fn dense_estimate(data: &[u8], p: i32) -> i64 {
+    let mut num_zeros = 0u32;
+    let mut sum = 0.0f64;
+    for &v in data {
+        if v == 0 {
+            num_zeros += 1;
+        }
+        // Exactly 1.0 / 2^v (v <= 61 after validation).
+        sum += f64::from_bits((1023 - u64::from(v)) << 52);
+    }
+    let m = f64::from(1i32 << p);
+    if num_zeros > 0 {
+        let h = m * (m / f64::from(num_zeros)).ln();
+        if h <= f64::from(estimate::linear_counting_threshold(p)) {
+            return estimate::java_round(h);
+        }
+    }
+    let e = estimate::alpha(p) * m * m / sum;
+    estimate::java_round(e - estimate::estimate_bias(e, p))
+}
+
+/// Linear counting over the sparse buckets (Java `SparseRepresentation.estimate`).
+pub(crate) fn sparse_estimate(sp: i32, sparse_size: i32) -> i64 {
+    let buckets = 1i64 << sp;
+    let num_zeros = buckets - i64::from(sparse_size);
+    let e = buckets as f64 * (buckets as f64 / num_zeros as f64).ln();
+    estimate::java_round(e)
 }
 
 /// Unsorted buffer of sparse values not yet merged into `sparse_data`.
@@ -190,60 +277,18 @@ impl HyperLogLogPlusPlus {
         Self::from_state(State::parse(bytes)?)
     }
 
-    fn from_state(state: State) -> Result<Self> {
-        if state.r#type != HYPERLOGLOG_PLUS_UNIQUE {
-            return Err(Error::InvalidState(format!(
-                "expected type HYPERLOGLOG_PLUS_UNIQUE but was {}",
-                state.r#type
-            )));
-        }
-        if state.encoding_version != ENCODING_VERSION {
-            return Err(Error::InvalidState(format!(
-                "expected encoding version {ENCODING_VERSION} but was {}",
-                state.encoding_version
-            )));
-        }
-        let allowed = allowed_types(state.value_type)?;
-        if state.has_sparse_data() && state.sparse_precision == SPARSE_PRECISION_DISABLED {
-            return Err(Error::InvalidState(
-                "must have a sparse precision when sparse data is set".into(),
-            ));
-        }
+    pub(crate) fn from_state(state: State) -> Result<Self> {
+        let allowed = validate(&state.view())?;
         let mode = if state.has_data() || state.sparse_precision == SPARSE_PRECISION_DISABLED {
-            check_normal_precision(state.precision)?;
-            if state.has_data() {
-                let want = 1usize << state.precision;
-                let got = state.data.as_ref().map_or(0, Vec::len);
-                if got != want {
-                    return Err(Error::InvalidState(format!(
-                        "expected data to consist of exactly {want} bytes but got {got}"
-                    )));
-                }
-            }
             Mode::Normal
         } else {
-            check_sparse_precision(state.precision, state.sparse_precision)?;
             Mode::Sparse(SparseBuffer::default())
         };
-        let mut hll = HyperLogLogPlusPlus {
+        Ok(HyperLogLogPlusPlus {
             state,
             allowed,
             mode,
-        };
-        if let Mode::Sparse(_) = hll.mode {
-            // Fail on corrupt sparse data at decode time rather than mid-merge.
-            if let Some(sd) = &hll.state.sparse_data {
-                encoding::decode_sparse(sd)?;
-            }
-        }
-        if let Some(data) = &hll.state.data {
-            let max = (65 - hll.state.precision) as u8;
-            if data.iter().any(|&r| r > max) {
-                return Err(Error::InvalidState("register value out of range".into()));
-            }
-        }
-        hll.allowed = allowed;
-        Ok(hll)
+        })
     }
 
     /// Normal (dense) precision.
@@ -339,7 +384,7 @@ impl HyperLogLogPlusPlus {
                 self.update_representation()?;
             }
         }
-        self.state.num_values += 1;
+        self.state.num_values = self.state.num_values.wrapping_add(1);
         Ok(())
     }
 
@@ -351,37 +396,15 @@ impl HyperLogLogPlusPlus {
         if self.is_sparse() {
             // Flushing re-encodes only; its errors cannot occur for in-memory values.
             let _ = self.flush_buffer();
-            let buckets = 1i64 << self.state.sparse_precision;
-            let num_zeros = buckets - i64::from(self.state.sparse_size);
-            let e = buckets as f64 * (buckets as f64 / num_zeros as f64).ln();
-            return estimate::java_round(e);
+            return sparse_estimate(self.state.sparse_precision, self.state.sparse_size);
         }
-        self.normal_estimate()
-    }
-
-    fn normal_estimate(&self) -> i64 {
         if !self.state.has_data() {
             return 0;
         }
-        let data = self.state.data.as_deref().unwrap_or(&[]);
-        let mut num_zeros = 0u32;
-        let mut sum = 0.0f64;
-        for &v in data {
-            if v == 0 {
-                num_zeros += 1;
-            }
-            sum += 1.0 / (1u64 << v) as f64;
-        }
-        let p = self.state.precision;
-        let m = f64::from(1i32 << p);
-        if num_zeros > 0 {
-            let h = m * (m / f64::from(num_zeros)).ln();
-            if h <= f64::from(estimate::linear_counting_threshold(p)) {
-                return estimate::java_round(h);
-            }
-        }
-        let e = estimate::alpha(p) * m * m / sum;
-        estimate::java_round(e - estimate::estimate_bias(e, p))
+        dense_estimate(
+            self.state.data.as_deref().unwrap_or(&[]),
+            self.state.precision,
+        )
     }
 
     /// Serializes to `AggregatorStateProto` bytes, identical to ZetaSketch Java
@@ -404,8 +427,9 @@ impl HyperLogLogPlusPlus {
     ///
     /// # Errors
     /// Malformed bytes, incompatible precision or value type.
+    /// To fold many sketches, prefer [`Accumulator`](crate::Accumulator): same result, no
+    /// per-sketch allocation.
     pub fn merge_bytes(&mut self, bytes: &[u8]) -> Result<()> {
-        // TECH_DEBT(per_sketch_decode_allocation): full decode + copies per merged sketch.
         if bytes.is_empty() {
             return Ok(());
         }
@@ -442,7 +466,7 @@ impl HyperLogLogPlusPlus {
                 self.add_sparse_values(enc, sorted)?;
             }
         }
-        self.state.num_values += other_values;
+        self.state.num_values = self.state.num_values.wrapping_add(other_values);
         Ok(())
     }
 
@@ -685,10 +709,11 @@ impl HyperLogLogPlusPlus {
                 self.add_sparse_value(enc, this.downgrade(v, enc))?;
             }
         }
-        // TECH_DEBT(sparse_downgrade_buffer_encoding): the reference re-adds buffered values
-        // labelled with the target encoding although they are still in the old one; mirrored.
+        // Java re-adds the buffered values as if they were already in `enc`, but they are still
+        // in `this`. That throws (index out of range) or silently corrupts registers. Downgrade
+        // them like the stored values instead; see docs/tech_debt/sparse_downgrade_buffer_encoding.md.
         for v in buffered {
-            self.add_sparse_value(enc, v)?;
+            self.add_sparse_value(enc, this.downgrade(v, enc))?;
         }
         Ok(())
     }

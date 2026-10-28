@@ -190,6 +190,43 @@ impl Sparse {
         target.encode(new_index, new_rho_w)
     }
 
+    /// True when `v` decodes to a register inside `2^p` with a `rhoW` the dense form can hold.
+    pub fn is_valid(self, v: u32) -> bool {
+        if !self.is_rho_encoded(v) {
+            return v >> self.sparse_precision == 0;
+        }
+        let rest = v ^ self.rho_encoded_flag;
+        rest < self.rho_encoded_flag
+            && (rest >> RHOW_BITS) >> self.normal_precision == 0
+            && i32::from(self.decode_normal_rho_w(v)) <= 65 - self.normal_precision
+    }
+
+    /// In-place [`dedupe`](Self::dedupe), for the allocation-free accumulator.
+    pub fn dedupe_in_place(self, values: &mut Vec<u32>) {
+        let mut w = 0;
+        let mut i = 0;
+        while i < values.len() {
+            let next = values[i];
+            i += 1;
+            if self.is_rho_encoded(next) {
+                let sparse_index = self.decode_sparse_index(next);
+                let mut max = next;
+                while i < values.len() && self.decode_sparse_index(values[i]) == sparse_index {
+                    max = values[i];
+                    i += 1;
+                }
+                values[w] = max;
+            } else {
+                while i < values.len() && values[i] == next {
+                    i += 1;
+                }
+                values[w] = next;
+            }
+            w += 1;
+        }
+        values.truncate(w);
+    }
+
     /// Collapses a sorted stream so that each sparse index appears once, keeping the largest
     /// `rhoW'` for rho-encoded values (Java `Encoding.Sparse.dedupe`).
     pub fn dedupe(self, sorted: &[u32]) -> Vec<u32> {
@@ -218,34 +255,124 @@ impl Sparse {
     }
 }
 
-/// Decodes a difference/varint-encoded sparse stream (Java `DifferenceDecoder`).
-pub(crate) fn decode_sparse(bytes: &[u8]) -> Result<Vec<u32>> {
-    let mut out = Vec::with_capacity(bytes.len());
+/// Streaming decoder for a difference/varint-encoded sparse stream (Java `DifferenceDecoder`),
+/// reading straight from the serialized bytes. Yields plain values and stops at the first
+/// corrupt one; check [`error`](Self::error) afterwards.
+pub(crate) struct SparseIter<'a> {
+    bytes: &'a [u8],
+    pos: usize,
+    last: u32,
+    error: Option<&'static str>,
+}
+
+impl<'a> SparseIter<'a> {
+    pub fn new(bytes: &'a [u8]) -> Self {
+        SparseIter {
+            bytes,
+            pos: 0,
+            last: 0,
+            error: None,
+        }
+    }
+
+    /// The decode error that ended iteration, if any.
+    pub fn error(&self) -> Result<()> {
+        self.error
+            .map_or(Ok(()), |m| Err(Error::CorruptSparseData(m)))
+    }
+
+    #[cold]
+    fn fail(&mut self, msg: &'static str) -> Option<u32> {
+        self.pos = self.bytes.len();
+        self.error = Some(msg);
+        None
+    }
+}
+
+impl Iterator for SparseIter<'_> {
+    type Item = u32;
+
+    #[inline]
+    fn next(&mut self) -> Option<u32> {
+        let bytes = self.bytes;
+        if self.pos >= bytes.len() {
+            return None;
+        }
+        // Fast path: one-byte delta, the common case for dense-ish sparse streams.
+        let b = bytes[self.pos];
+        let delta = if b & 0x80 == 0 {
+            self.pos += 1;
+            u32::from(b)
+        } else {
+            let mut delta: u32 = 0;
+            let mut shift = 0;
+            loop {
+                let Some(&b) = bytes.get(self.pos) else {
+                    return self.fail("truncated varint");
+                };
+                self.pos += 1;
+                if shift == 28 && b & 0xf0 != 0 {
+                    return self.fail("varint too long");
+                }
+                delta |= u32::from(b & 0x7f) << shift;
+                if b & 0x80 == 0 {
+                    break delta;
+                }
+                shift += 7;
+            }
+        };
+        self.last = self.last.wrapping_add(delta);
+        if self.last > i32::MAX as u32 {
+            return self.fail("negative value");
+        }
+        Some(self.last)
+    }
+}
+
+/// Decodes and range-checks a whole sparse stream into `out` in one pass. On error `out` holds
+/// a partial prefix and must be discarded.
+pub(crate) fn decode_validated_into(bytes: &[u8], enc: Sparse, out: &mut Vec<u32>) -> Result<()> {
+    out.clear();
+    out.reserve(bytes.len());
+    let n = bytes.len();
     let mut pos = 0;
-    let mut last: u32 = 0;
-    while pos < bytes.len() {
-        let mut delta: u32 = 0;
-        let mut shift = 0;
-        loop {
-            let b = *bytes
-                .get(pos)
-                .ok_or(Error::CorruptSparseData("truncated varint"))?;
-            pos += 1;
-            if shift == 28 && b & 0xf0 != 0 {
-                return Err(Error::CorruptSparseData("varint too long"));
+    let mut last = 0u32;
+    while pos < n {
+        let mut b = u32::from(bytes[pos]);
+        pos += 1;
+        let mut delta = b & 0x7f;
+        if b & 0x80 != 0 {
+            let mut shift = 7;
+            loop {
+                if pos >= n {
+                    return Err(Error::CorruptSparseData("truncated varint"));
+                }
+                b = u32::from(bytes[pos]);
+                pos += 1;
+                if shift == 28 && b & 0xf0 != 0 {
+                    return Err(Error::CorruptSparseData("varint too long"));
+                }
+                delta |= (b & 0x7f) << shift;
+                if b & 0x80 == 0 {
+                    break;
+                }
+                shift += 7;
             }
-            delta |= u32::from(b & 0x7f) << shift;
-            if b & 0x80 == 0 {
-                break;
-            }
-            shift += 7;
         }
         last = last.wrapping_add(delta);
-        if last > i32::MAX as u32 {
-            return Err(Error::CorruptSparseData("negative value"));
+        if last > i32::MAX as u32 || !enc.is_valid(last) {
+            return Err(Error::CorruptSparseData("value out of range"));
         }
         out.push(last);
     }
+    Ok(())
+}
+
+/// Decodes a whole sparse stream into a vector.
+pub(crate) fn decode_sparse(bytes: &[u8]) -> Result<Vec<u32>> {
+    let mut it = SparseIter::new(bytes);
+    let out: Vec<u32> = it.by_ref().collect();
+    it.error()?;
     Ok(out)
 }
 
@@ -263,7 +390,15 @@ pub(crate) fn encode_sparse(values: &[u32]) -> Vec<u8> {
 
 /// Merges two ascending sequences (Java `MergedIntIterator`; ties take `a` first).
 pub(crate) fn merge_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
-    let mut out = Vec::with_capacity(a.len() + b.len());
+    let mut out = Vec::new();
+    merge_sorted_into(a, b, &mut out);
+    out
+}
+
+/// [`merge_sorted`] into a reused buffer.
+pub(crate) fn merge_sorted_into(a: &[u32], b: &[u32], out: &mut Vec<u32>) {
+    out.clear();
+    out.reserve(a.len() + b.len());
     let (mut i, mut j) = (0, 0);
     while i < a.len() || j < b.len() {
         if j < b.len() && (i >= a.len() || b[j] < a[i]) {
@@ -274,5 +409,4 @@ pub(crate) fn merge_sorted(a: &[u32], b: &[u32]) -> Vec<u32> {
             i += 1;
         }
     }
-    out
 }

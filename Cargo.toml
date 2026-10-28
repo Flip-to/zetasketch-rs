@@ -28,3 +28,7 @@ module_name_repetitions = "allow"
 many_single_char_names = "allow"
 doc_markdown = "allow"
 struct_field_names = "allow"
+
+[[bench]]
+name = "fold"
+harness = false

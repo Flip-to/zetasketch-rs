@@ -9,6 +9,7 @@ format). It decodes, merges, estimates and re-serializes sketches, and builds th
 Cargo.toml                    # crate `zetasketch`, zero dependencies, unsafe forbidden
 src/
   lib.rs                      # public API re-exports
+  accumulator.rs              # Accumulator: zero-copy, allocation-free fold; falls back to hll.rs for mixed precision
   hll.rs                      # HyperLogLogPlusPlus: sparse/normal representations, add, merge, estimate, serialize
   encoding.rs                 # Normal/Sparse encodings, rhoW, downgrade, dedupe, difference varint stream
   proto.rs                    # hand-rolled AggregatorStateProto + HyperLogLogPlusUniqueStateProto reader/writer
@@ -19,6 +20,10 @@ src/
 tests/
   golden_corpus.rs            # Java reference parity (zetasketch-cpp golden corpus)
   bigquery_golden.rs          # BigQuery HLL_COUNT parity (synthetic fixtures)
+  accumulator.rs              # Accumulator == reference fold (golden + randomized + mixed precision)
+  robustness.rs               # corrupt input never panics
+benches/fold.rs               # reference fold vs Accumulator throughput (std-only)
+fuzz/                         # cargo-fuzz targets (own workspace; nightly)
   data/                       # golden_corpus.tsv, bigquery_golden.tsv
 scripts/
   check_docs_layout.py        # CI guard for docs, decisions, tech debt, beans, A2V
@@ -42,6 +47,8 @@ cargo clippy --all-targets -- -D warnings             # pedantic lints, see [lin
 cargo fmt --check
 uv run scripts/check_docs_layout.py [--write-index]   # docs/decisions/tech_debt/beans guard
 uv run scripts/gen_bigquery_fixtures.py --project <p> # refresh BigQuery fixtures
+cargo bench --bench fold                              # fold throughput
+cd fuzz && cargo +nightly fuzz run differential_fold  # differential fuzzing (Linux/macOS)
 ```
 
 ## Invariants
@@ -54,6 +61,10 @@ uv run scripts/gen_bigquery_fixtures.py --project <p> # refresh BigQuery fixture
   sparse values.
 - **Fixtures are synthetic only.** Never commit real or customer sketches, values, project
   names or table names (`DECISION(synthetic_fixtures_only)`). Generator queries read no tables.
+- **`Accumulator` must equal the reference fold.** Any fast-path change keeps
+  `tests/accumulator.rs` green. Inputs it cannot handle exactly go to the reference fallback.
+- Decoding rejects out-of-range input; nothing on a public path may panic
+  (`tests/robustness.rs`). Count arithmetic wraps like Java's `long`.
 - `src/bias_data.rs` is generated. Change `scripts/gen_bias_data.py`, never the output.
 - Shifts that can reach the type width use `wrapping_shl`, because Java masks shift amounts.
 
