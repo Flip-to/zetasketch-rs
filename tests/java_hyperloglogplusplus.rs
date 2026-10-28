@@ -719,7 +719,7 @@ fn check_serialized_three_integers() {
     let actual = decode(&a.serialize());
     let hll = actual.hll.clone().expect("hll extension");
     assert!(hll.sparse_data.is_some());
-    assert!(hll.data.as_deref().unwrap_or_default().is_empty());
+    assert_eq!(hll.data.as_deref().unwrap_or_default(), b"");
     assert_eq!(
         actual,
         State {
