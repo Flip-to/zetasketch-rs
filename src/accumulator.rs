@@ -5,13 +5,16 @@
 //! without copying. The dense register array and the sparse buffers are kept across inputs, and
 //! across [`Accumulator::reset`], so a steady-state fold allocates nothing.
 //!
-//! The fast path covers inputs that share the first input's normal and sparse precision and have
-//! sparse mode enabled. Anything else (a precision change, sparse mode disabled, an input that
-//! carries both dense and sparse data) switches the accumulator to the reference
-//! implementation for the rest of the fold. That keeps the result exact.
+//! The fast path covers every input with sparse mode enabled while the accumulator is dense,
+//! whatever its precision (Java's dense merge is deterministic: lower the registers once, or
+//! downgrade the input on the fly), and same-precision inputs while it is sparse. A precision
+//! change while sparse, sparse mode disabled, or an input carrying both dense and sparse data
+//! runs that merge on the reference implementation, whose sparse buffering is order-dependent;
+//! the accumulator returns to the fast path as soon as the reference state has no unflushed
+//! buffer. That keeps the result exact.
 //! DECISION(faithful_port_of_java_reference)
 
-use crate::encoding::{self, Sparse};
+use crate::encoding::{self, Normal, Sparse};
 use crate::error::{Error, Result};
 use crate::hll::{self, HyperLogLogPlusPlus};
 use crate::proto::{State, StateView, HYPERLOGLOG_PLUS_UNIQUE};
@@ -49,6 +52,8 @@ pub struct Accumulator {
     sparse: Vec<u32>,
     incoming: Vec<u32>,
     merged: Vec<u32>,
+    /// Scratch registers for lowering the dense precision.
+    lowered: Vec<u8>,
     fallback: Option<HyperLogLogPlusPlus>,
 }
 
@@ -105,7 +110,9 @@ impl Accumulator {
             return Ok(());
         }
         if let Some(f) = &mut self.fallback {
-            return f.merge_bytes(bytes);
+            f.merge_bytes(bytes)?;
+            self.try_resume();
+            return Ok(());
         }
         let view = StateView::parse(bytes)?;
         let allowed = hll::validate_header(&view)?;
@@ -119,7 +126,9 @@ impl Accumulator {
     /// Incompatible precision or value type. On error the accumulator is unchanged.
     pub fn add_sketch(&mut self, sketch: &HyperLogLogPlusPlus) -> Result<()> {
         if let Some(f) = &mut self.fallback {
-            return f.merge_ref(sketch);
+            f.merge_ref(sketch)?;
+            self.try_resume();
+            return Ok(());
         }
         if sketch.has_buffered_values() {
             // Unflushed adds: only the reference merge sees them exactly as Java does.
@@ -130,6 +139,7 @@ impl Accumulator {
             let mut f = HyperLogLogPlusPlus::from_state(self.build_state())?;
             f.merge_ref(sketch)?;
             self.fallback = Some(f);
+            self.try_resume();
             return Ok(());
         }
         let view = sketch.state_view();
@@ -157,19 +167,25 @@ impl Accumulator {
                 self.allowed
             )));
         }
-        // TECH_DEBT(mixed_precision_fallback_path): a precision change switches to the reference.
-        if !fast
-            || view.precision != self.precision
-            || view.sparse_precision != self.sparse_precision
-        {
+        let same_precision =
+            view.precision == self.precision && view.sparse_precision == self.sparse_precision;
+        if !fast || (!self.dense && !same_precision) {
+            // The reference's sparse merge across precisions buffers values one by one; run it
+            // there, then resume on the fast path once its buffer is flushed.
             let mut f = HyperLogLogPlusPlus::from_state(self.build_state())?;
             f.merge(HyperLogLogPlusPlus::from_state(view.to_state())?)?;
             self.fallback = Some(f);
+            self.try_resume();
             return Ok(());
         }
         self.decode_incoming(view)?;
         self.allowed = types;
         self.num_values = self.num_values.wrapping_add(view.num_values);
+
+        if self.dense && !same_precision {
+            self.merge_into_dense_any_precision(view);
+            return Ok(());
+        }
 
         if let Some(data) = view.data.filter(|d| !d.is_empty()) {
             if !self.dense {
@@ -279,6 +295,106 @@ impl Accumulator {
 
     fn max_sparse_bytes(&self) -> usize {
         ((1i64 << self.precision) as f32 * 0.75f32) as usize
+    }
+
+    /// Java `NormalRepresentation.merge` / `addSparseValues` for a dense accumulator and an input
+    /// of any precision: lower the registers if the input's normal precision is lower
+    /// (`maybeDowngrade`), take the lower sparse precision, then max the input in, downgrading
+    /// its registers or sparse values when its precision is higher. Deterministic, no buffer.
+    fn merge_into_dense_any_precision(&mut self, view: &StateView<'_>) {
+        // maybeDowngrade(other.precision, other.sparse_precision)
+        if !(self.precision <= view.precision && self.sparse_precision <= view.sparse_precision) {
+            if self.precision > view.precision {
+                let from = Normal {
+                    precision: self.precision,
+                };
+                let to = Normal {
+                    precision: view.precision,
+                };
+                self.lowered.clear();
+                self.lowered.resize(1 << view.precision, 0);
+                encoding::downgrade_registers_max_into(
+                    &self.registers,
+                    from.precision,
+                    &mut self.lowered,
+                    to.precision,
+                );
+                std::mem::swap(&mut self.registers, &mut self.lowered);
+                self.precision = view.precision;
+            }
+            self.sparse_precision = self.sparse_precision.min(view.sparse_precision);
+        }
+        let target = Normal {
+            precision: self.precision,
+        };
+        if let Some(data) = view.data.filter(|d| !d.is_empty()) {
+            let source = Normal {
+                precision: view.precision,
+            };
+            if source.precision == target.precision {
+                max_into(&mut self.registers, data);
+            } else {
+                encoding::downgrade_registers_max_into(
+                    data,
+                    source.precision,
+                    &mut self.registers,
+                    target.precision,
+                );
+            }
+        } else {
+            let enc = Sparse::new(view.precision, view.sparse_precision);
+            for &v in &self.incoming {
+                let (idx, rho) = if target.precision < enc.normal_precision {
+                    (
+                        enc.decode_and_downgrade_normal_index(v, target),
+                        enc.decode_and_downgrade_normal_rho_w(v, target),
+                    )
+                } else {
+                    (enc.decode_normal_index(v), enc.decode_normal_rho_w(v))
+                };
+                if self.registers[idx] < rho {
+                    self.registers[idx] = rho;
+                }
+            }
+        }
+    }
+
+    /// Leaves the reference fallback when its state can be continued on the fast path: no
+    /// unflushed buffer (see `HyperLogLogPlusPlus::resumable_state`).
+    fn try_resume(&mut self) {
+        let Some(f) = &self.fallback else { return };
+        let Some((state, allowed)) = f.resumable_state() else {
+            return;
+        };
+        let sparse = match &state.sparse_data {
+            Some(sd) if !state.has_data() => match encoding::decode_sparse(sd) {
+                Ok(v) => Some((v, sd.len())),
+                Err(_) => return,
+            },
+            _ => None,
+        };
+        self.started = true;
+        self.allowed = allowed;
+        self.value_type = state.value_type;
+        self.num_values = state.num_values;
+        self.precision = state.precision;
+        self.sparse_precision = state.sparse_precision;
+        self.sparse_size = state.sparse_size;
+        if let Some((values, bytes)) = sparse {
+            self.dense = false;
+            self.sparse = values;
+            self.sparse_bytes = bytes;
+        } else if let Some(data) = state.data.as_deref().filter(|d| !d.is_empty()) {
+            self.dense = true;
+            self.registers.clear();
+            self.registers.extend_from_slice(data);
+        } else {
+            // Sparse mode with no stream yet.
+            self.dense = false;
+            self.sparse.clear();
+            self.sparse_bytes = 0;
+        }
+        self.fallback = None;
     }
 
     /// Decodes and validates the input's sparse stream into `incoming`, before any state change.

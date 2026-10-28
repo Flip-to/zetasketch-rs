@@ -5,6 +5,7 @@
 //! Workloads, each 2,000 serialized INT64 sketches folded into one result 20 times:
 //!
 //! - mixed: 70% sparse (1..2,000 values), 30% dense (5,000..50,000 values);
+//! - mixed precision: as mixed, but 1 sketch in 20 is p=12 (forces precision lowering);
 //! - sparse-heavy: 1..12 values each, so the union stays sparse for most of the fold.
 //!
 //! Std-only timing, no criterion.
@@ -15,6 +16,14 @@ use std::time::Instant;
 use zetasketch::{Accumulator, HyperLogLogPlusPlus};
 
 fn workload(count: usize, size: impl Fn(usize, u64) -> u64) -> Vec<Vec<u8>> {
+    workload_p(count, size, |_| 15)
+}
+
+fn workload_p(
+    count: usize,
+    size: impl Fn(usize, u64) -> u64,
+    precision: impl Fn(usize) -> i32,
+) -> Vec<Vec<u8>> {
     let mut seed = 0x2545_f491_4f6c_dd1du64;
     let mut next = move || {
         seed ^= seed << 13;
@@ -26,7 +35,7 @@ fn workload(count: usize, size: impl Fn(usize, u64) -> u64) -> Vec<Vec<u8>> {
         .map(|i| {
             let n = size(i, next());
             let start = (next() % 1_000_000) as i64;
-            let mut s = HyperLogLogPlusPlus::for_longs(15).unwrap();
+            let mut s = HyperLogLogPlusPlus::for_longs(precision(i)).unwrap();
             for v in start..start + n as i64 {
                 s.add_long(v).unwrap();
             }
@@ -87,6 +96,20 @@ fn main() {
                 5_000 + r % 45_000
             }
         }),
+    );
+    run(
+        "mixed precision (1 in 20 at p=12, rest p=15; 70% sparse)",
+        &workload_p(
+            2_000,
+            |i, r| {
+                if i % 10 < 7 {
+                    1 + r % 2_000
+                } else {
+                    5_000 + r % 45_000
+                }
+            },
+            |i| if i % 20 == 3 { 12 } else { 15 },
+        ),
     );
     run(
         "sparse-heavy (1..12 values each)",

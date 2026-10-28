@@ -296,3 +296,37 @@ fn value_kind_standard_error_and_precisions() {
     acc.add_bytes(&longs.serialize()).unwrap();
     assert_eq!(acc.precisions(), Some((15, 20)));
 }
+
+/// Mixed-precision folds that reach every new path: a dense accumulator meeting lower precisions
+/// (registers lowered) and higher ones (input downgraded), sparse accumulators changing precision
+/// (reference merge, then resume on the fast path), precision chains, and dense, sparse and
+/// tiny inputs in random order. Bytes, estimate, cardinality and count must equal the reference.
+#[test]
+fn randomized_mixed_precision_dense_paths() {
+    let mut rng = Rng(0x00c0_ffee_d00d_f00d);
+    let mut acc = Accumulator::new();
+    for round in 0..400 {
+        let k = 2 + rng.below(12) as usize;
+        let inputs: Vec<Vec<u8>> = (0..k)
+            .map(|_| {
+                let p = [10, 11, 12, 13, 14, 15, 16][rng.below(7) as usize];
+                let mut s = HyperLogLogPlusPlus::for_longs(p).unwrap();
+                let n = match rng.below(3) {
+                    0 => rng.below(20),
+                    1 => rng.size(4_000),
+                    _ => 5_000 + rng.below(40_000),
+                };
+                let start = rng.below(100_000) as i64;
+                for v in start..start + n as i64 {
+                    s.add_long(v).unwrap();
+                }
+                s.serialize()
+            })
+            .collect();
+        assert_eq!(
+            fast_fold(&mut acc, &inputs),
+            reference_fold(&inputs),
+            "round {round} k={k}"
+        );
+    }
+}

@@ -34,6 +34,11 @@ All notable changes to this crate. The format follows
 - `Accumulator::serialize` writes straight from its buffers, with no 32 KiB register copy and no
   re-validation.
 
+- Mixed-precision folds stay on the fast path: dense accumulators take any precision
+  (registers lowered once, inputs downgraded with a per-block closed form). Sparse accumulators
+  resume the fast path after one reference merge. Mixed-precision bench: 40.9 to 17.2 us per
+  sketch (3.1x faster than the reference fold).
+
 ### Internal
 
 - Ported Java ZetaSketch's own unit tests: 74 public-API tests in

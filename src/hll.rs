@@ -498,6 +498,19 @@ impl HyperLogLogPlusPlus {
         self.merge(other.clone())
     }
 
+    /// The state and allowed types when the sketch can be resumed on the accumulator's fast path:
+    /// no unflushed buffer, sparse mode enabled, and not both dense and sparse data at once.
+    pub(crate) fn resumable_state(&self) -> Option<(&State, u8)> {
+        if self.has_buffered_values()
+            || self.state.sparse_precision == SPARSE_PRECISION_DISABLED
+            || (self.state.data.is_some() && self.state.sparse_data.is_some())
+            || (!self.is_sparse() && !self.state.has_data())
+        {
+            return None;
+        }
+        Some((&self.state, self.allowed))
+    }
+
     /// True when adds are buffered and not yet flushed into the sparse stream.
     pub(crate) fn has_buffered_values(&self) -> bool {
         matches!(&self.mode, Mode::Sparse(buf) if !buf.values.is_empty())
