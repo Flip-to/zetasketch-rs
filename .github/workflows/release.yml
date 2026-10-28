@@ -1,0 +1,65 @@
+name: Release (crates.io & GitHub Release)
+
+on:
+  push:
+    tags:
+      - "v*.*.*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Existing tag to release (e.g. v0.1.0)"
+        required: true
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release:
+    name: Verify, publish, release
+    runs-on: ubuntu-24.04
+    env:
+      TAG: ${{ github.event.inputs.tag || github.ref_name }}
+      CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+    steps:
+      - uses: actions/checkout@v5
+        with:
+          ref: ${{ env.TAG }}
+          fetch-depth: 0
+
+      - name: Install toolchain
+        run: rustup toolchain install stable --profile minimal --component clippy && rustup default stable
+
+      - name: Tag matches Cargo.toml version
+        run: |
+          VERSION=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')
+          if [ "v${VERSION}" != "${TAG}" ]; then
+            echo "::error::tag ${TAG} does not match Cargo.toml version ${VERSION}"
+            exit 1
+          fi
+
+      - name: Lint and parity suites
+        run: |
+          cargo clippy --all-targets -- -D warnings
+          cargo test --release
+
+      - name: Package (dry run)
+        run: cargo publish --dry-run --locked
+
+      - name: Publish to crates.io
+        if: env.CARGO_REGISTRY_TOKEN != ''
+        run: cargo publish --locked
+
+      - name: Skip publish (no token)
+        if: env.CARGO_REGISTRY_TOKEN == ''
+        run: echo "::warning::CARGO_REGISTRY_TOKEN secret not set; crate packaged but not published"
+
+      - name: GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${TAG}" target/package/*.crate \
+            --title "${TAG}" --generate-notes --verify-tag
