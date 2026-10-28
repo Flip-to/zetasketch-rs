@@ -46,12 +46,21 @@ jobs:
           cargo clippy --all-targets -- -D warnings
           cargo test --release
 
-      - name: Package (dry run)
-        run: cargo publish --dry-run --locked
+      - name: Package
+        # Leaves target/package/<name>-<version>.crate for the GitHub Release asset.
+        run: cargo package --locked
+
+      - name: Already on crates.io?
+        id: published
+        run: |
+          NAME=$(cargo metadata --no-deps --format-version 1 | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["name"])')
+          CODE=$(curl -s -o /dev/null -w '%{http_code}' -A "${GITHUB_REPOSITORY} release" \
+            "https://crates.io/api/v1/crates/${NAME}/${TAG#v}")
+          echo "exists=$([ "$CODE" = 200 ] && echo true || echo false)" >> "$GITHUB_OUTPUT"
 
       - name: Publish to crates.io
-        if: env.CARGO_REGISTRY_TOKEN != ''
-        run: cargo publish --locked
+        if: env.CARGO_REGISTRY_TOKEN != '' && steps.published.outputs.exists != 'true'
+        run: cargo publish --locked --no-verify
 
       - name: Skip publish (no token)
         if: env.CARGO_REGISTRY_TOKEN == ''
@@ -61,5 +70,9 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${TAG}" target/package/*.crate \
-            --title "${TAG}" --generate-notes --verify-tag
+          if gh release view "${TAG}" > /dev/null 2>&1; then
+            gh release upload "${TAG}" target/package/*.crate --clobber
+          else
+            gh release create "${TAG}" target/package/*.crate \
+              --title "${TAG}" --generate-notes --verify-tag
+          fi
