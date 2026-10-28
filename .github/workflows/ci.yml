@@ -28,11 +28,11 @@ jobs:
           - os: macos-latest
             toolchain: stable
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install toolchain
         shell: bash
         run: rustup toolchain install ${{ matrix.toolchain }} --profile minimal && rustup default ${{ matrix.toolchain }}
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -46,7 +46,7 @@ jobs:
     name: Fuzz smoke (60s per target)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install nightly + cargo-fuzz
         run: rustup toolchain install nightly --profile minimal && cargo install cargo-fuzz --locked
       - name: Run targets
@@ -59,10 +59,10 @@ jobs:
     name: Lint & docs layout guard
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install toolchain
         run: rustup toolchain install stable --profile minimal --component rustfmt,clippy && rustup default stable
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -104,12 +104,12 @@ jobs:
     name: Coverage (cargo-llvm-cov)
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@v5
+      - uses: actions/checkout@v7
       - name: Install toolchain + llvm-tools + cargo-llvm-cov
         run: |
           rustup toolchain install stable --profile minimal --component llvm-tools-preview && rustup default stable
           cargo install cargo-llvm-cov --locked
-      - uses: actions/cache@v5
+      - uses: actions/cache@v6
         with:
           path: |
             ~/.cargo/registry
@@ -125,7 +125,7 @@ jobs:
             cargo llvm-cov report --release --summary-only
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: lcov
           path: lcov.info
