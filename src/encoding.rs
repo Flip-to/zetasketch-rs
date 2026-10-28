@@ -303,6 +303,63 @@ impl Iterator for SparseIter<'_> {
     }
 }
 
+/// Max-merges dense `source` registers at a higher precision into `target` registers at a lower
+/// one, with the same result as applying `Normal::downgrade_index` / `downgrade_rho_w` to every
+/// source register (Java `mergeNormalDataMaybeDowngrading`), but per block instead of per
+/// register.
+///
+/// Lowering by `d` bits maps each block of `2^d` source registers to one target register:
+/// - offset 0 maps to `r + d` (or 0 when `r == 0`);
+/// - a non-zero register at offset `o > 0` maps to `d - floor(log2 o)`, independent of its
+///   value.
+///
+/// So the block's value is `max(first + d, d - floor(log2(first non-zero offset)))`. That only
+/// needs a scan for the first non-zero byte, which is cheap.
+pub(crate) fn downgrade_registers_max_into(
+    source: &[u8],
+    source_p: i32,
+    target: &mut [u8],
+    target_p: i32,
+) {
+    debug_assert!(source_p > target_p);
+    debug_assert_eq!(source.len(), 1 << source_p);
+    debug_assert_eq!(target.len(), 1 << target_p);
+    let d = (source_p - target_p) as u32;
+    let block = 1usize << d;
+    for (t, chunk) in target.iter_mut().zip(source.chunks_exact(block)) {
+        let first = chunk[0];
+        let mut best = if first == 0 { 0 } else { first + d as u8 };
+        if let Some(off) = first_nonzero_after_first(chunk) {
+            let rho = (d - (off as u32).ilog2()) as u8;
+            best = best.max(rho);
+        }
+        if *t < best {
+            *t = best;
+        }
+    }
+}
+
+/// Offset of the first non-zero byte in `chunk[1..]` (as an index into `chunk`), scanning eight
+/// bytes per step with `u64` words when the block is at least 8 bytes long.
+#[inline]
+fn first_nonzero_after_first(chunk: &[u8]) -> Option<usize> {
+    if chunk.len() < 8 {
+        return chunk[1..].iter().position(|&r| r != 0).map(|o| o + 1);
+    }
+    for (w, word) in chunk.chunks_exact(8).enumerate() {
+        let mut bytes = [0u8; 8];
+        bytes.copy_from_slice(word);
+        let mut x = u64::from_le_bytes(bytes);
+        if w == 0 {
+            x &= !0xff; // skip offset 0
+        }
+        if x != 0 {
+            return Some(w * 8 + (x.trailing_zeros() / 8) as usize);
+        }
+    }
+    None
+}
+
 /// Decodes and range-checks a whole sparse stream into `out` in one pass. On error `out` holds
 /// a partial prefix and must be discarded.
 pub(crate) fn decode_validated_into(bytes: &[u8], enc: Sparse, out: &mut Vec<u32>) -> Result<()> {
@@ -515,6 +572,53 @@ mod tests {
                 let mut union_bytes = encode_sparse(&union).len();
                 insert_dedupe(enc, &mut union, &b, &mut union_bytes);
                 assert_eq!((union, union_bytes), expected, "insert p={p} sp={sp}");
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod downgrade_block_tests {
+    use super::*;
+
+    fn per_register(source: &[u8], sp: i32, target: &mut [u8], tp: i32) {
+        let (from, to) = (Normal { precision: sp }, Normal { precision: tp });
+        for (i, &r) in source.iter().enumerate() {
+            let ni = from.downgrade_index(i, to);
+            let nr = from.downgrade_rho_w(i, r, to);
+            if target[ni] < nr {
+                target[ni] = nr;
+            }
+        }
+    }
+
+    #[test]
+    fn block_downgrade_matches_per_register() {
+        let mut seed = 0x1234_5678_9abc_def0u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for sp in 4..=16 {
+            for tp in 4..sp {
+                for density in [0u64, 2, 10, 50, 100] {
+                    let source: Vec<u8> = (0..1usize << sp)
+                        .map(|_| {
+                            if next() % 100 < density {
+                                (1 + next() % (65 - sp as u64)) as u8
+                            } else {
+                                0
+                            }
+                        })
+                        .collect();
+                    let start: Vec<u8> = (0..1usize << tp).map(|_| (next() % 4) as u8).collect();
+                    let (mut a, mut b) = (start.clone(), start);
+                    downgrade_registers_max_into(&source, sp, &mut a, tp);
+                    per_register(&source, sp, &mut b, tp);
+                    assert_eq!(a, b, "sp={sp} tp={tp} density={density}");
+                }
             }
         }
     }
