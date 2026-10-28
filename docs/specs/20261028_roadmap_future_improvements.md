@@ -62,7 +62,14 @@ difference: the buffered-downgrade fix, and the stricter bounds checks at decode
 | `Aggregator<V, R, A>` interface | none | An `Aggregator` trait, only once a second sketch type exists |
 | `UniqueStatsProto.expected_error` | none | `expected_error()` ≈ 1.04 / sqrt(2^p) |
 
-### 3. Native KLL quantiles (`KLL_QUANTILES`), spike first
+### 3. Native KLL quantiles (`KLL_QUANTILES`), spike first (spike done)
+
+Spike result: `docs/findings/20261029_kll_quantiles_feasibility_spike.md`. BigQuery KLL bytes
+are **not deterministic**, because `INIT` and `MERGE_PARTIAL` differ between executions, so byte
+parity is impossible. The sketch format decodes cleanly, and `EXTRACT` appears exactly
+reproducible from the stored bytes. The plan narrows to decode + exact `EXTRACT` + statistically
+correct merges.
+
 
 KLL answers a different question from HLL++:
 
