@@ -580,8 +580,11 @@ impl Accumulator {
         // merge in the reference could have crossed it, and a sparse union with max-rho dedupe
         // does not depend on merge order. Merge once, later.
         // DECISION(deferred_sparse_merges)
-        let bound = self.sparse_bytes + 5 * (self.pending.len() + self.incoming.len());
-        if bound < self.max_sparse_bytes() {
+        // The cap bounds memory per accumulator (8 KiB of pending values) when a request holds
+        // thousands of live accumulators; flushing earlier is always exact.
+        let deferred = self.pending.len() + self.incoming.len();
+        let bound = self.sparse_bytes + 5 * deferred;
+        if bound < self.max_sparse_bytes() && deferred <= MAX_PENDING {
             self.pending.extend_from_slice(&self.incoming);
             return;
         }
@@ -620,6 +623,9 @@ impl Accumulator {
         }
     }
 }
+
+/// Most deferred sparse values one accumulator holds before merging them (see `merge_sparse`).
+const MAX_PENDING: usize = 2048;
 
 /// Per-thread scratch buffers lent to accumulators (see `Accumulator::with_scratch`).
 #[derive(Default)]

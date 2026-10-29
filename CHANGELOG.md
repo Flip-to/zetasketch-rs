@@ -20,6 +20,8 @@ All notable changes to this crate. The format follows
   sorting. The proof is in `docs/decisions/20261029_deferred_sparse_merges.md`. On a grouped
   request (`examples/group_by.rs`: 1,000 groups x 17 metrics x 30 small sketches) this goes from
   655 to about 210 ms (3.1x); sparse-heavy fold bench about 0.2–0.4 us per sketch, from 1.7.
+- Deferred sparse values are capped at 2,048 per accumulator (8 KiB): memory stays bounded when a
+  request holds thousands of accumulators. Flushing earlier is exact.
 - Accumulator scratch buffers are lent from a per-thread pool, so idle accumulators hold no
   scratch memory. `size_of::<Accumulator>()` went from 296 to 192 bytes.
 
@@ -63,6 +65,9 @@ All notable changes to this crate. The format follows
   `docs/decisions/20261029_dense_estimate_exact_histogram.md`.
 
 ### Internal
+
+- `bench.yml`: fold benchmarks and microbenchmarks on a Linux x86-64 runner, posted to the
+  job summary (informational, never fails).
 
 - Ported Java ZetaSketch's own unit tests: 74 public-API tests in
   `tests/java_hyperloglogplusplus.rs` and 97 internal-module tests in `src/java_internal_tests.rs`.
