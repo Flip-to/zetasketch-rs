@@ -34,9 +34,17 @@ for group in groups {
 }
 ```
 
-`cargo bench --bench fold` (2,000 synthetic p = 15 sketches, 70% sparse): the reference fold
-takes 22.0 us per sketch, the accumulator 10.4 us (2.1x). Measured on 2026-10-28, on one
-Windows machine.
+`cargo bench --bench fold` (2,000 synthetic sketches per workload; one Windows machine,
+2026-10-29), in microseconds per sketch:
+
+| Workload | Reference fold | `Accumulator` |
+|---|---|---|
+| Mixed: p = 15, 70% sparse inputs | 19.9 | 8.7 (2.3x) |
+| Mixed precision: 1 in 20 at p = 12 | 50.0 | 16.5 (3.0x) |
+| Sparse-heavy: 1 to 12 values each | 60.1 | 1.7 (34.6x) |
+
+Results are identical in every case. Where the time goes, and an optimization that was tried
+and rejected, is in `docs/findings/20261029_fold_cost_breakdown.md`.
 
 ```rust
 use zetasketch::HyperLogLogPlusPlus;
