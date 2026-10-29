@@ -9,6 +9,10 @@ on:
 permissions:
   contents: read
 
+env:
+  # Incremental artifacts only bloat the cached target directory; CI never reuses them.
+  CARGO_INCREMENTAL: 0
+
 concurrency:
   group: ci-${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
@@ -39,6 +43,9 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-${{ matrix.toolchain }}-${{ hashFiles('Cargo.lock') }}
+          # A changed Cargo.lock restores the newest cache of this job and rebuilds only what
+          # changed, instead of starting from nothing.
+          restore-keys: cargo-${{ runner.os }}-${{ matrix.toolchain }}-
       - name: Golden corpus + BigQuery parity
         run: cargo test --release
 
@@ -69,6 +76,9 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-lint-${{ hashFiles('Cargo.lock') }}
+          # A changed Cargo.lock restores the newest cache of this job and rebuilds only what
+          # changed, instead of starting from nothing.
+          restore-keys: cargo-${{ runner.os }}-lint-
       - run: cargo fmt --check
       - run: cargo clippy --all-targets -- -D warnings
       - name: Docs build without warnings
@@ -187,6 +197,9 @@ jobs:
             ~/.cargo/git
             target
           key: cargo-${{ runner.os }}-coverage-${{ hashFiles('Cargo.lock') }}
+          # A changed Cargo.lock restores the newest cache of this job and rebuilds only what
+          # changed, instead of starting from nothing.
+          restore-keys: cargo-${{ runner.os }}-coverage-
       - name: Line and region coverage of src/ (all test suites)
         run: |
           cargo llvm-cov --release --lcov --output-path lcov.info
