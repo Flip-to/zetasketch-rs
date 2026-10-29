@@ -132,6 +132,25 @@ MERGE_CASES: list[tuple[str, str, list[tuple[int, int, int]]]] = [
         "int64",
         [(15, 0, 0), (15, 0, 100), (15, 5, 5), (15, 50, 300), (15, 9, 9)],
     ),
+    # Dense accumulator meeting other precisions: lowered registers, downgraded inputs.
+    (
+        "int_dense_then_lower_then_higher",
+        "int64",
+        [(15, 0, 60000), (12, 100, 400), (16, 1000, 90000), (14, 5, 50000)],
+    ),
+    (
+        "int_dense_p16_sparse_p12_dense_p13",
+        "int64",
+        [(16, 0, 80000), (12, 10, 300), (13, 500, 30000)],
+    ),
+    (
+        "int_thirty_way_mixed",
+        "int64",
+        [
+            ((10, 11, 12, 13, 14, 15)[i % 6], i * 997, i * 997 + (50 if i % 4 else 20000))
+            for i in range(30)
+        ],
+    ),
     *[
         (f"int_pair_p{a}_p{b}_{kind}", "int64", [(a, 0, n), (b, n // 2, n + n // 2)])
         for a, b in [(10, 12), (12, 10), (14, 16), (16, 14), (10, 16), (16, 10)]
