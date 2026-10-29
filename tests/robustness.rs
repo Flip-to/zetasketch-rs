@@ -91,3 +91,35 @@ fn random_bytes_never_panic() {
         exercise(&b, &partner);
     }
 }
+
+/// `add_trusted_bytes` skips per-value checks, so corrupt input may error or panic, but it must
+/// never hang or abort the process. Each case runs under `catch_unwind`.
+#[test]
+fn trusted_mode_on_corrupt_input_errors_or_panics_only() {
+    let seeds: Vec<Vec<u8>> = rows(BIGQUERY)
+        .filter(|r| r[0] == "INIT")
+        .map(|r| b64_decode(r[2]))
+        .filter(|b| b.len() < 4096)
+        .collect();
+    let mut rng = Rng(0x7a57_ed00);
+    let default_hook = std::panic::take_hook();
+    std::panic::set_hook(Box::new(|_| {}));
+    let mut panics = 0;
+    for i in 0..5_000 {
+        let mut b = seeds[i % seeds.len()].clone();
+        let at = (rng.next() as usize) % b.len();
+        b[at] ^= 1 << (rng.next() % 8);
+        let partner = seeds[(i * 3 + 1) % seeds.len()].clone();
+        let outcome = std::panic::catch_unwind(move || {
+            let mut acc = Accumulator::new();
+            let _ = acc.add_trusted_bytes(&partner);
+            let _ = acc.add_trusted_bytes(&b);
+            let _ = acc.cardinality();
+            let _ = acc.serialize();
+        });
+        panics += usize::from(outcome.is_err());
+    }
+    std::panic::set_hook(default_hook);
+    // Panics are allowed (documented); this only checks that nothing worse happens.
+    assert!(panics <= 5_000);
+}

@@ -116,6 +116,20 @@ pub(crate) fn validate(view: &StateView<'_>) -> Result<u8> {
 /// Everything [`validate`] checks except walking the sparse stream. When sparse data is
 /// present the precision pair is checked, so `Sparse::new(p, sp)` is safe to build.
 pub(crate) fn validate_header(view: &StateView<'_>) -> Result<u8> {
+    let allowed = validate_structure(view)?;
+    if let Some(data) = view.data.filter(|d| !d.is_empty()) {
+        let max = (65 - view.precision) as u8;
+        if data.iter().copied().max().unwrap_or(0) > max {
+            return Err(Error::InvalidState("register value out of range".into()));
+        }
+    }
+    Ok(allowed)
+}
+
+/// The cheap part of [`validate_header`]: type, encoding version, value type, precisions and
+/// data length, without scanning register values. Enough to keep later code from allocating
+/// absurd sizes or indexing out of range on the dense array.
+pub(crate) fn validate_structure(view: &StateView<'_>) -> Result<u8> {
     if view.r#type != HYPERLOGLOG_PLUS_UNIQUE {
         return Err(Error::InvalidState(format!(
             "expected type HYPERLOGLOG_PLUS_UNIQUE but was {}",
@@ -143,10 +157,6 @@ pub(crate) fn validate_header(view: &StateView<'_>) -> Result<u8> {
                     "expected data to consist of exactly {want} bytes but got {}",
                     data.len()
                 )));
-            }
-            let max = (65 - view.precision) as u8;
-            if data.iter().copied().max().unwrap_or(0) > max {
-                return Err(Error::InvalidState("register value out of range".into()));
             }
         }
     } else {

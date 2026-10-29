@@ -41,6 +41,7 @@ for group in groups {
 |---|---|---|
 | Mixed: p = 15, 70% sparse inputs | 19.9 | 8.7 (2.3x) |
 | Mixed precision: 1 in 20 at p = 12 | 50.0 | 16.5 (3.0x) |
+| Grouped request: 1,000 groups x 17 metrics x 30 small sketches (`examples/group_by.rs`) | n/a | about 210 ms per request (was 655 ms in 0.2.0) |
 | Sparse-heavy: 1 to 12 values each | 60.1 | 1.7 (34.6x) |
 
 Results are identical in every case. Where the time goes, and an optimization that was tried

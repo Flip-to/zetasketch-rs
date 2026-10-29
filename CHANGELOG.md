@@ -4,6 +4,25 @@ All notable changes to this crate. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org/) (pre-1.0: a minor bump may break the API).
 
+## [0.2.1] - unreleased
+
+### Added
+
+- `Accumulator::add_trusted_bytes`: folds bytes that were validated earlier, skipping the
+  per-value range scans. Same result on valid input. On corrupt input it may error, give a wrong
+  result or panic; never undefined behavior. About 37% faster on dense p = 15 inputs (1.20 to
+  0.76 us); no measurable change on tiny sparse inputs.
+
+### Performance
+
+- Same-precision sparse merges are deferred while the sparse -> dense threshold provably can't
+  be reached, then merged once. `cardinality`/`estimate` count distinct sparse indices without
+  sorting. The proof is in `docs/decisions/20261029_deferred_sparse_merges.md`. On a grouped
+  request (`examples/group_by.rs`: 1,000 groups x 17 metrics x 30 small sketches) this goes from
+  655 to about 210 ms (3.1x); sparse-heavy fold bench about 0.2–0.4 us per sketch, from 1.7.
+- Accumulator scratch buffers are lent from a per-thread pool, so idle accumulators hold no
+  scratch memory. `size_of::<Accumulator>()` went from 296 to 192 bytes.
+
 ## [0.2.0] - 2026-10-29
 
 ### Changed (breaking)
