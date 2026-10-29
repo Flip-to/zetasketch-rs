@@ -72,6 +72,54 @@ BigQuery's `EXTRACT_INT64(sketch, 10)` on that sketch returned
 Ranking against the true count (300) instead of the total item weight (305) gives a different
 answer for 7 of the 9 inner deciles. The strict `>` variant differs at one decile.
 
+## Follow-up: 84 sketches, 1,092 BigQuery outputs (2026-10-29)
+
+`scripts/research/kll_probe.py` built `INIT_INT64` / `INIT_FLOAT64` sketches. The grid:
+
+- families: sequential, negative (`-x*7919-1`), heavy duplicates (`MOD(x,17)-8`), FLOAT64
+  (`x*0.5-100.25`);
+- k in {10, 100, 1000};
+- n in {1, 2, 10, 100, 1,000, 10,000, 100,000}.
+
+For each it kept `EXTRACT_*` for q in {2, 4, 10, 100} and `EXTRACT_POINT_*` for 9 values of phi
+from 0 to 1.
+
+**Encodings confirmed:**
+
+- INT64 min, max and the first delta of a compactor are protobuf `int64` (two's-complement
+  varint, 10 bytes when negative, not zigzag). Later deltas are positive varints in compactor
+  field 2.
+- FLOAT64 sketches have value_type = 10, min and max as raw little-endian doubles, and items as
+  packed doubles in compactor field 1.
+- Compactors are positional: an empty compactor still occupies its level, so weights are 2^index.
+- Field 1 is 26, 54, 280 and 2954 for k = 10, 20, 100 and 1000, close to 3k. Probably a derived
+  capacity; EXTRACT doesn't need it.
+
+**EXTRACT rule:** 335 of 336 quantile vectors and 753 of 756 point lookups match exactly (1,088
+of 1,092), using the rule above (target j/q x W or phi x W, first item with cumulative weight at
+least the target, stored min and max at the ends). The 4 misses were re-run against the exact
+stored bytes (`FROM_BASE64`) and BigQuery returned the same values, so they are real
+differences, not artifacts of re-running a randomized `INIT`.
+
+All 4 misses are at k = 10 with n of at least 10,000 (heavy compaction): three extreme points
+(phi = 0.001 and 0.999) and one q = 100 vector. Variants tried, none better:
+
+| Variant | Score |
+|---|---|
+| strict `>` | 854/1092 |
+| midpoint (cumulative minus w/2) | 675/1092 |
+| target from the true count n | 968/1092 |
+| floor of the target | 226/336 quantile vectors, 630/756 points |
+| ceiling of the target | same as exact, 753/756 points |
+
+The needed target shifts down for small phi and up for large phi. That suggests BigQuery treats
+the tails differently (stored min and max as weighted anchors? interpolation?). Unresolved; a
+KLL implementation must settle it before claiming exact `EXTRACT`.
+
+Fixture generation for an implementation must compute `EXTRACT_*` from the stored bytes
+(`FROM_BASE64`), not from the same CTE. BigQuery does not promise to evaluate a CTE once, and
+`INIT` is randomized.
+
 ## Recommendation
 
 KLL is feasible as **decode + exact EXTRACT + statistically correct merge**. Before building it,
