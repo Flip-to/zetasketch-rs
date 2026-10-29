@@ -19,6 +19,9 @@ HyperLogLog++, the sketch format that BigQuery `HLL_COUNT.*` produces and consum
   result.
 - No dependencies and `#![forbid(unsafe_code)]`.
 
+To fold one large group on several threads, fold chunks into separate accumulators and
+combine them with `Accumulator::merge`, which is exactly a merge of partial results.
+
 To fold many stored sketches (one result per group, thousands of inputs), use `Accumulator`.
 It gives the same bytes and estimate as the reference fold, parses without copying, and
 allocates nothing per input in steady state:

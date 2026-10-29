@@ -38,7 +38,7 @@ jobs:
             echo "## Benchmarks ($(nproc) vCPU, $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs))"
             echo '```'
             cargo bench --bench fold 2>/dev/null | grep -E '^==|ns/sketch|speedup'
-            for ex in group_by group_by_split tiny_fold dense_into_dense sparse_into_dense estimate_cost; do
+            for ex in group_by group_by_split tiny_fold dense_into_dense sparse_into_dense estimate_cost parallel_fold; do
               cargo run --release --quiet --example "$ex" 2>/dev/null
             done
             echo '```'
