@@ -166,6 +166,7 @@ jobs:
             else
               echo "::error::seed $seed: Rust and Java ZetaSketch differ"
               diff "/tmp/rust_$seed.txt" "/tmp/java_$seed.txt" | cut -c1-200 | head -20
+              grep -m3 '^EXC' "/tmp/java_$seed.txt" || true
               exit 1
             fi
           done

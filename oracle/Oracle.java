@@ -40,8 +40,11 @@ public final class Oracle {
     HyperLogLogPlusPlus current = null;
     boolean strings = false;
     boolean failed = false;
+    String failure = "";
+    int lineNo = 0;
     String line;
     while ((line = in.readLine()) != null) {
+      lineNo++;
       if (line.isEmpty()) {
         continue;
       }
@@ -75,7 +78,7 @@ public final class Oracle {
             break;
           case "E":
             if (failed) {
-              out.println("EXC skipped");
+              out.println("EXC " + failure);
               break;
             }
             byte[] bytes = current.serializeToByteArray();
@@ -86,8 +89,17 @@ public final class Oracle {
         }
       } catch (RuntimeException e) {
         failed = true;
+        failure =
+            e.getClass().getSimpleName()
+                + " at ops line "
+                + lineNo
+                + " ("
+                + f[0]
+                + "): "
+                + String.valueOf(e.getMessage()).replace('
+', ' ');
         if (f[0].equals("E")) {
-          out.println("EXC " + e.getClass().getSimpleName());
+          out.println("EXC " + failure);
         }
       }
     }
