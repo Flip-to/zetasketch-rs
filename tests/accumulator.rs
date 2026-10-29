@@ -416,3 +416,114 @@ fn pending_cap_flushes_stay_exact() {
     }
     assert_eq!(acc.serialize().unwrap(), reference.serialize());
 }
+
+/// `a.merge(&b)` must equal `a.add_bytes(&b.serialize())`, and folding chunks separately then
+/// merging must equal the reference merge of the chunk results, for random partitions, chunk
+/// counts and precisions, including mixed precisions and fallback states.
+#[test]
+fn merge_of_partial_accumulators_equals_reference_merge_of_partials() {
+    let mut rng = Rng(0x0a11_c0de);
+    for round in 0..120 {
+        let n = 2 + rng.below(40) as usize;
+        let mixed = round % 3 == 0;
+        let inputs: Vec<Vec<u8>> = (0..n)
+            .map(|_| {
+                let p = if mixed {
+                    [10, 12, 15][rng.below(3) as usize]
+                } else {
+                    15
+                };
+                let mut s = HyperLogLogPlusPlus::for_longs(p).unwrap();
+                let start = rng.below(1_000_000) as i64;
+                for v in start..start + rng.size(8_000) as i64 {
+                    s.add_long(v).unwrap();
+                }
+                s.serialize()
+            })
+            .collect();
+        let chunks = 1 + rng.below(6) as usize;
+        let size = n.div_ceil(chunks);
+        let mut partials: Vec<Accumulator> = inputs
+            .chunks(size)
+            .map(|c| {
+                let mut a = Accumulator::new();
+                for b in c {
+                    a.add_bytes(b).unwrap();
+                }
+                a
+            })
+            .collect();
+        let serialized: Vec<Vec<u8>> = partials.iter().map(|a| a.serialize().unwrap()).collect();
+
+        // Contract 1: merge == add_bytes(serialize()).
+        let mut via_bytes = partials[0].clone();
+        for s in &serialized[1..] {
+            via_bytes.add_bytes(s).unwrap();
+        }
+        let rest = partials.split_off(1);
+        let mut merged = partials.pop().unwrap();
+        for p in &rest {
+            merged.merge(p).unwrap();
+        }
+        assert_eq!(
+            merged.cardinality(),
+            via_bytes.cardinality(),
+            "round {round}"
+        );
+        assert_eq!(merged.num_values(), via_bytes.num_values(), "round {round}");
+        assert_eq!(merged.serialize(), via_bytes.serialize(), "round {round}");
+
+        // Contract 2: equals the reference merge of the partial results.
+        assert_eq!(
+            (
+                merged.serialize().unwrap(),
+                merged.estimate(),
+                merged.num_values()
+            ),
+            reference_fold(&serialized),
+            "round {round}"
+        );
+    }
+}
+
+/// Folding chunks on threads and merging gives the same result as folding the same chunks on
+/// one thread and merging (thread-local scratch must not leak state between accumulators).
+#[test]
+fn parallel_chunk_folds_merge_deterministically() {
+    let mut rng = Rng(0x7_4ead);
+    let inputs: Vec<Vec<u8>> = (0..400)
+        .map(|_| {
+            let mut s = HyperLogLogPlusPlus::for_longs(15).unwrap();
+            let start = rng.below(5_000_000) as i64;
+            for v in start..start + rng.size(5_000) as i64 {
+                s.add_long(v).unwrap();
+            }
+            s.serialize()
+        })
+        .collect();
+    let fold = |c: &[Vec<u8>]| {
+        let mut a = Accumulator::new();
+        for b in c {
+            a.add_bytes(b).unwrap();
+        }
+        a
+    };
+    let sequential: Vec<Accumulator> = inputs.chunks(50).map(fold).collect();
+    let parallel: Vec<Accumulator> = std::thread::scope(|s| {
+        let handles: Vec<_> = inputs
+            .chunks(50)
+            .map(|c| s.spawn(move || fold(c)))
+            .collect();
+        handles.into_iter().map(|h| h.join().unwrap()).collect()
+    });
+    let combine = |parts: &[Accumulator]| {
+        let mut acc = parts[0].clone();
+        for p in &parts[1..] {
+            acc.merge(p).unwrap();
+        }
+        acc
+    };
+    let (a, b) = (combine(&sequential), combine(&parallel));
+    assert_eq!(a.serialize(), b.serialize());
+    assert_eq!(a.cardinality(), b.cardinality());
+}

@@ -120,6 +120,18 @@ Fixture generation for an implementation must compute `EXTRACT_*` from the store
 (`FROM_BASE64`), not from the same CTE. BigQuery does not promise to evaluate a CTE once, and
 `INIT` is randomized.
 
+## Implementation result (2026-10-29)
+
+The experimental `kll` module implements the decode and the rule above. A new fixture set
+(`scripts/gen_kll_fixtures.py`, 126 sketches) computes EXTRACT from the stored bytes in a
+separate query. On it, 1,629 of 1,638 outputs match.
+
+The 9 differences are all at k = 10 with n of at least 10,000, and include some inner
+percentiles, not only the tails (heavy-duplicate data at the 58th and 62nd percentile). The
+needed effective target is sometimes slightly above `j/q x W` and sometimes slightly below, so it
+is not a constant offset, a different total weight, the true count n, or an inclusive/exclusive
+switch. Unresolved; listed exactly in `tests/kll_golden.rs` so new differences fail the test.
+
 ## Recommendation
 
 KLL is feasible as **decode + exact EXTRACT + statistically correct merge**. Before building it,
