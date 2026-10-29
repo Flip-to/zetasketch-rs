@@ -16,6 +16,10 @@ All notable changes to this crate. The format follows
 
 ### Added
 
+- **Experimental** `kll` module: decodes BigQuery `KLL_QUANTILES` sketches (INT64, FLOAT64)
+  and extracts quantiles and points. 1,629 of 1,638 BigQuery outputs match on 126 synthetic
+  fixtures (`tests/kll_golden.rs`, `scripts/gen_kll_fixtures.py`); the 9 known differences are
+  all at k = 10 with n >= 10,000. No merge (BigQuery's KLL is randomized). The API may change.
 - `Accumulator::merge(&other)`: combine accumulators that folded different chunks, for example on
   different threads. Exactly `add_bytes(&other.serialize())` without the round trip; equal to
   the reference merge of the partial results (how BigQuery combines partial aggregates).

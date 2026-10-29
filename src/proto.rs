@@ -327,3 +327,163 @@ impl<'a> Reader<'a> {
         }
     }
 }
+
+/// Raw fields of a `KLL_QUANTILES` sketch (aggregator type 113): see `crate::kll`.
+#[derive(Debug, Clone)]
+pub(crate) struct KllRaw {
+    pub num_values: i64,
+    pub value_type: i32,
+    pub k: i64,
+    min: Vec<u8>,
+    max: Vec<u8>,
+    /// One entry per compactor level, in order: packed doubles (field 1) and/or packed varint
+    /// deltas (field 2). Empty levels still occupy their position.
+    levels: Vec<(Vec<u8>, Vec<u8>)>,
+}
+
+impl KllRaw {
+    pub const VALUE_TYPE_INT64: i32 = 4;
+    pub const VALUE_TYPE_FLOAT64: i32 = 10;
+
+    pub fn level_count(&self) -> usize {
+        self.levels.len()
+    }
+
+    pub fn int_levels(&self) -> Result<Vec<Vec<i64>>> {
+        self.levels
+            .iter()
+            .map(|(_, packed)| {
+                let mut r = Reader {
+                    buf: packed,
+                    pos: 0,
+                };
+                let mut out = Vec::new();
+                let mut acc = 0i64;
+                while !r.at_end() {
+                    // First delta is a protobuf int64 (two's complement), later ones positive.
+                    acc = acc.wrapping_add(r.varint64()? as i64);
+                    out.push(acc);
+                }
+                Ok(out)
+            })
+            .collect()
+    }
+
+    pub fn float_levels(&self) -> Result<Vec<Vec<f64>>> {
+        self.levels
+            .iter()
+            .map(|(packed, _)| {
+                if packed.len() % 8 != 0 {
+                    return Err(Error::Proto("packed doubles not a multiple of 8 bytes"));
+                }
+                Ok(packed
+                    .chunks_exact(8)
+                    .map(|c| f64::from_le_bytes(c.try_into().expect("8 bytes")))
+                    .collect())
+            })
+            .collect()
+    }
+
+    fn int_field(bytes: &[u8]) -> Result<i64> {
+        let mut r = Reader { buf: bytes, pos: 0 };
+        let v = r.varint64()? as i64;
+        if !r.at_end() {
+            return Err(Error::Proto("trailing bytes after KLL integer bound"));
+        }
+        Ok(v)
+    }
+
+    fn float_field(bytes: &[u8]) -> Result<f64> {
+        let b: [u8; 8] = bytes
+            .try_into()
+            .map_err(|_| Error::Proto("KLL float bound is not 8 bytes"))?;
+        Ok(f64::from_le_bytes(b))
+    }
+
+    pub fn int_min(&self) -> Result<i64> {
+        Self::int_field(&self.min)
+    }
+
+    pub fn int_max(&self) -> Result<i64> {
+        Self::int_field(&self.max)
+    }
+
+    pub fn float_min(&self) -> Result<f64> {
+        Self::float_field(&self.min)
+    }
+
+    pub fn float_max(&self) -> Result<f64> {
+        Self::float_field(&self.max)
+    }
+}
+
+const KLL_TYPE: i32 = 113;
+const KLL_STATE_TAG: u32 = 113 << 3 | WIRE_LEN;
+
+/// Parses a `KLL_QUANTILES` sketch envelope and its KLL state.
+pub(crate) fn parse_kll(bytes: &[u8]) -> Result<KllRaw> {
+    let mut raw = KllRaw {
+        num_values: 0,
+        value_type: DEFAULT_VALUE_TYPE,
+        k: 0,
+        min: Vec::new(),
+        max: Vec::new(),
+        levels: Vec::new(),
+    };
+    let mut ty = 0;
+    let mut r = Reader { buf: bytes, pos: 0 };
+    while !r.at_end() {
+        let tag = r.tag()?;
+        match tag {
+            TYPE_TAG => ty = r.varint32()?,
+            NUM_VALUES_TAG => raw.num_values = r.varint64()? as i64,
+            VALUE_TYPE_TAG => raw.value_type = r.varint32()?,
+            KLL_STATE_TAG => {
+                let mut s = Reader {
+                    buf: r.length_delimited()?,
+                    pos: 0,
+                };
+                while !s.at_end() {
+                    let t = s.tag()?;
+                    match t {
+                        // Field 1: unexplained (about 3k); not needed to extract quantiles.
+                        x if x == (1 << 3 | WIRE_VARINT) => {
+                            s.varint64()?;
+                        }
+                        x if x == (2 << 3 | WIRE_VARINT) => raw.k = s.varint64()? as i64,
+                        x if x == (3 << 3 | WIRE_LEN) => raw.min = s.length_delimited()?.to_vec(),
+                        x if x == (4 << 3 | WIRE_LEN) => raw.max = s.length_delimited()?.to_vec(),
+                        x if x == (5 << 3 | WIRE_LEN) => {
+                            let mut c = Reader {
+                                buf: s.length_delimited()?,
+                                pos: 0,
+                            };
+                            let mut level = (Vec::new(), Vec::new());
+                            while !c.at_end() {
+                                let ct = c.tag()?;
+                                match ct {
+                                    x if x == (1 << 3 | WIRE_LEN) => {
+                                        level.0 = c.length_delimited()?.to_vec();
+                                    }
+                                    x if x == (2 << 3 | WIRE_LEN) => {
+                                        level.1 = c.length_delimited()?.to_vec();
+                                    }
+                                    _ => c.skip(ct)?,
+                                }
+                            }
+                            raw.levels.push(level);
+                        }
+                        _ => s.skip(t)?,
+                    }
+                }
+            }
+            _ => r.skip(tag)?,
+        }
+    }
+    if ty != KLL_TYPE {
+        return Err(Error::InvalidState(format!(
+            "expected aggregator type 113 (KLL_QUANTILES) but was {ty}"
+        )));
+    }
+    Ok(raw)
+}

@@ -123,3 +123,37 @@ fn trusted_mode_on_corrupt_input_errors_or_panics_only() {
     // Panics are allowed (documented); this only checks that nothing worse happens.
     assert!(panics <= 5_000);
 }
+
+const KLL: &str = include_str!("data/kll_golden.tsv");
+
+/// The experimental KLL decoder: mutated and random bytes return errors, never panic, and
+/// whatever decodes can be queried.
+#[test]
+fn kll_mutated_sketches_never_panic() {
+    let seeds: Vec<Vec<u8>> = rows(KLL)
+        .filter(|r| r[0] == "KLL")
+        .map(|r| b64_decode(r[3]))
+        .filter(|b| b.len() < 4096)
+        .collect();
+    assert!(seeds.len() > 20);
+    let mut rng = Rng(0x0c11_7e57);
+    for i in 0..20_000 {
+        let mut b = seeds[i % seeds.len()].clone();
+        match rng.next() % 3 {
+            0 => {
+                let at = (rng.next() as usize) % b.len();
+                b[at] ^= 1 << (rng.next() % 8);
+            }
+            1 => {
+                let at = (rng.next() as usize) % b.len();
+                b[at] = rng.next() as u8;
+            }
+            _ => b.truncate((rng.next() as usize) % b.len()),
+        }
+        if let Ok(s) = zetasketch::kll::KllSketch::from_bytes(&b) {
+            let _ = s.quantiles(1 + (rng.next() % 200) as usize);
+            let _ = s.point((rng.next() % 1001) as f64 / 1000.0);
+            let _ = (s.min(), s.max(), s.k(), s.num_values());
+        }
+    }
+}
