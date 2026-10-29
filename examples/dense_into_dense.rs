@@ -1,4 +1,4 @@
-//! Microbench: cost per dense p=15 input folded into a dense accumulator.
+//! Microbench: cost per dense p=15 input folded into a dense accumulator, checked and trusted.
 use std::time::Instant;
 use zetasketch::{Accumulator, HyperLogLogPlusPlus};
 
@@ -13,18 +13,25 @@ fn main() {
         })
         .collect();
     let mut acc = Accumulator::new();
-    let mut best = f64::MAX;
-    for _ in 0..20 {
-        acc.reset();
-        let t = Instant::now();
-        for s in &dense {
-            acc.add_bytes(s).unwrap();
+    for trusted in [false, true] {
+        let mut best = f64::MAX;
+        for _ in 0..20 {
+            acc.reset();
+            let t = Instant::now();
+            for s in &dense {
+                if trusted {
+                    acc.add_trusted_bytes(s).unwrap();
+                } else {
+                    acc.add_bytes(s).unwrap();
+                }
+            }
+            best = best.min(t.elapsed().as_nanos() as f64 / dense.len() as f64);
+            std::hint::black_box(acc.cardinality());
         }
-        best = best.min(t.elapsed().as_nanos() as f64 / dense.len() as f64);
-        std::hint::black_box(acc.cardinality());
+        let mode = if trusted { "trusted" } else { "checked" };
+        println!(
+            "dense -> dense ({mode}): {best:.0} ns/input ({:.2} ns/register, best of 20)",
+            best / 32768.0
+        );
     }
-    println!(
-        "dense -> dense: {best:.0} ns/input ({:.2} ns/register, best of 20)",
-        best / 32768.0
-    );
 }

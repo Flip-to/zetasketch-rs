@@ -399,6 +399,15 @@ pub(crate) fn decode_validated_into(bytes: &[u8], enc: Sparse, out: &mut Vec<u32
     Ok(())
 }
 
+/// Like [`decode_validated_into`] but without the per-value range check: only the varint framing
+/// is checked. For streams that were validated earlier (see `Accumulator::add_trusted_bytes`).
+pub(crate) fn decode_unvalidated_into(bytes: &[u8], out: &mut Vec<u32>) -> Result<()> {
+    out.clear();
+    let mut it = SparseIter::new(bytes);
+    out.extend(it.by_ref());
+    it.error()
+}
+
 /// Decodes a whole sparse stream into a vector.
 pub(crate) fn decode_sparse(bytes: &[u8]) -> Result<Vec<u32>> {
     let mut it = SparseIter::new(bytes);

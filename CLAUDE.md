@@ -73,6 +73,9 @@ cd fuzz && cargo +nightly fuzz run differential_fold  # differential fuzzing (Li
 - `estimate()` takes `&mut self` for exact Java parity. The dense estimate sums a register
   histogram, which is bit-identical to Java's loop by the proof in
   `docs/decisions/20261029_dense_estimate_exact_histogram.md`. Keep that proof valid.
+- `Accumulator` defers same-precision sparse merges under the 5-bytes-per-value bound
+  (`docs/decisions/20261029_deferred_sparse_merges.md`). Any change to the sparse encoding must
+  re-check that bound.
 - Public enums are `#[non_exhaustive]`. Keep any new public enum that way.
 - `src/bias_data.rs` is generated. Change `scripts/gen_bias_data.py`, never the output.
 - Shifts that can reach the type width use `wrapping_shl`, because Java masks shift amounts.

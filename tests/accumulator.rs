@@ -34,7 +34,24 @@ fn fast_fold(acc: &mut Accumulator, inputs: &[Vec<u8>]) -> (Vec<u8>, i64, i64) {
     let card = acc.cardinality();
     let est = acc.estimate();
     assert_eq!(card, est, "accumulator cardinality() != estimate()");
-    (acc.serialize().unwrap(), est, acc.num_values())
+    let result = (acc.serialize().unwrap(), est, acc.num_values());
+
+    // Trusted mode must give the same result on valid input.
+    let mut trusted = Accumulator::new();
+    for b in inputs {
+        trusted.add_trusted_bytes(b).unwrap();
+    }
+    let trusted_est = trusted.estimate();
+    assert_eq!(
+        (
+            trusted.serialize().unwrap(),
+            trusted_est,
+            trusted.num_values()
+        ),
+        result,
+        "add_trusted_bytes differs from add_bytes"
+    );
+    result
 }
 
 #[test]
@@ -328,5 +345,48 @@ fn randomized_mixed_precision_dense_paths() {
             reference_fold(&inputs),
             "round {round} k={k}"
         );
+    }
+}
+
+/// Reads while merges are deferred (`cardinality`, `serialize`, `to_sketch`, `num_values`) must
+/// equal the reference after every single input, not only at the end. That covers deferral
+/// through the sparse -> dense crossover and back-to-back reads.
+#[test]
+fn reads_during_deferred_merges_match_reference_at_every_step() {
+    let mut rng = Rng(0xdefe_77ed);
+    for p in [10, 12, 15] {
+        let inputs: Vec<Vec<u8>> = (0..400)
+            .map(|_| {
+                let mut s = HyperLogLogPlusPlus::for_longs(p).unwrap();
+                let start = rng.below(1_000_000) as i64;
+                for v in start..start + 1 + rng.below(40) as i64 {
+                    s.add_long(v).unwrap();
+                }
+                s.serialize()
+            })
+            .collect();
+        let mut reference = HyperLogLogPlusPlus::from_bytes(&inputs[0]).unwrap();
+        let mut acc = Accumulator::new();
+        acc.add_bytes(&inputs[0]).unwrap();
+        for (i, b) in inputs.iter().enumerate().skip(1) {
+            reference.merge_bytes(b).unwrap();
+            acc.add_bytes(b).unwrap();
+            assert_eq!(acc.cardinality(), reference.cardinality(), "p={p} step={i}");
+            assert_eq!(acc.num_values(), reference.num_values(), "p={p} step={i}");
+            if i % 7 == 0 {
+                assert_eq!(
+                    acc.serialize().unwrap(),
+                    reference.clone().serialize(),
+                    "p={p} step={i}"
+                );
+                let mut snap = acc.to_sketch().unwrap();
+                assert_eq!(
+                    snap.serialize(),
+                    reference.clone().serialize(),
+                    "p={p} step={i}"
+                );
+            }
+        }
+        assert_eq!(acc.estimate(), reference.estimate(), "p={p} final");
     }
 }
