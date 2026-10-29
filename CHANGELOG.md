@@ -6,6 +6,8 @@ All notable changes to this crate. The format follows
 
 ## [Unreleased]
 
+## [0.2.3] - 2026-10-29
+
 ### Performance
 
 - Small sparse sketches (a few values, under 128 bytes) fold about 2x faster. A compact proto
