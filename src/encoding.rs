@@ -623,3 +623,26 @@ mod downgrade_block_tests {
         }
     }
 }
+
+#[cfg(test)]
+mod sparse_iter_error_tests {
+    use super::*;
+
+    #[test]
+    fn decode_sparse_reports_each_corruption() {
+        assert_eq!(
+            decode_sparse(&[0x05, 0x80]),
+            Err(Error::CorruptSparseData("truncated varint"))
+        );
+        assert_eq!(
+            decode_sparse(&[0xff, 0xff, 0xff, 0xff, 0x10]),
+            Err(Error::CorruptSparseData("varint too long"))
+        );
+        // 0x7fffffff, then +1 overflows past i32::MAX.
+        assert_eq!(
+            decode_sparse(&[0xff, 0xff, 0xff, 0xff, 0x07, 0x01]),
+            Err(Error::CorruptSparseData("negative value"))
+        );
+        assert_eq!(decode_sparse(&[0x01, 0x02, 0x7f]), Ok(vec![1, 3, 130]));
+    }
+}
