@@ -24,10 +24,6 @@ from __future__ import annotations
 
 import argparse
 from pathlib import Path
-from typing import TYPE_CHECKING
-
-if TYPE_CHECKING:
-    from google.cloud import bigquery
 
 OUT = Path(__file__).resolve().parent.parent / "tests" / "data" / "kll_golden.tsv"
 
@@ -72,12 +68,9 @@ GROUP BY n ORDER BY n"""
             )
             stored = [(r.n, r.b64) for r in client.query(init, job_config=cfg).result()]
             for n, b64 in stored:
-                qs = ", ".join(
-                    f"KLL_QUANTILES.EXTRACT_{typ}(s, {q}) AS q{q}" for q in QS
-                )
+                qs = ", ".join(f"KLL_QUANTILES.EXTRACT_{typ}(s, {q}) AS q{q}" for q in QS)
                 pts = ", ".join(
-                    f"KLL_QUANTILES.EXTRACT_POINT_{typ}(s, {p}) AS p{i}"
-                    for i, p in enumerate(PHIS)
+                    f"KLL_QUANTILES.EXTRACT_POINT_{typ}(s, {p}) AS p{i}" for i, p in enumerate(PHIS)
                 )
                 extract = f"SELECT {qs}, {pts} FROM (SELECT FROM_BASE64(@b) AS s)"
                 cfg = bigquery.QueryJobConfig(

@@ -89,6 +89,30 @@ The other scripts regenerate the generated inputs:
 Design and decisions live in [`docs/`](docs/README.md). Contributor and agent rules are in
 [`CLAUDE.md`](CLAUDE.md) and [`AGENTS.md`](AGENTS.md).
 
+## Experimental: BigQuery `KLL_QUANTILES`
+
+`zetasketch::kll::KllSketch` decodes `KLL_QUANTILES.INIT_INT64` / `INIT_FLOAT64` /
+`MERGE_PARTIAL` bytes and answers `quantiles(q)` (= `KLL_QUANTILES.EXTRACT_*`) and `point(phi)`
+(= `EXTRACT_POINT_*`):
+
+```rust
+use zetasketch::kll::{KllSketch, KllValue};
+
+let sketch = KllSketch::from_bytes(&bytes_from_bigquery)?;
+let quartiles: Vec<KllValue> = sketch.quantiles(4)?;  // min, p25, p50, p75, max
+let p99: KllValue = sketch.point(0.99)?;
+```
+
+- **Parity:** 1,629 of 1,638 BigQuery outputs match exactly on 126 synthetic sketches
+  (`tests/kll_golden.rs`: INT64, FLOAT64, negatives, duplicates, extremes; k = 10/100/1000;
+  n = 1 to 100,000). All 9 differences are at **k = 10 with n >= 10,000**, where BigQuery picks a
+  neighbouring stored item. They are listed in the test and explained in
+  `docs/findings/20261029_kll_quantiles_feasibility_spike.md`. At the default k = 1000 every
+  checked output matches.
+- **No merge.** BigQuery's KLL compaction is randomized per execution, so merged bytes can never
+  match BigQuery's.
+- Experimental: the API may change in any release.
+
 ## Roadmap
 
 Planned work, ranked by priority and risk, is in

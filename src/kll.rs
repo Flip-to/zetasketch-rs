@@ -40,7 +40,8 @@ pub struct KllSketch {
     k: i64,
     min: KllValue,
     max: KllValue,
-    total_weight: u64,
+    /// Sum of item weights. `u128`: up to 63 levels of `2^level` weights cannot overflow.
+    total_weight: u128,
     /// Sorted by value; each item's weight is `2^level`.
     items: Items,
 }
@@ -53,10 +54,10 @@ impl KllSketch {
     /// contents (no items, a level too high to weigh, min/max of the wrong type).
     pub fn from_bytes(bytes: &[u8]) -> Result<Self> {
         let raw = parse_kll(bytes)?;
-        Self::from_raw(raw)
+        Self::from_raw(&raw)
     }
 
-    fn from_raw(raw: KllRaw) -> Result<Self> {
+    fn from_raw(raw: &KllRaw) -> Result<Self> {
         if raw.level_count() > 63 {
             return Err(Error::InvalidState("too many KLL levels".into()));
         }
@@ -95,8 +96,8 @@ impl KllSketch {
             }
         };
         let total_weight = match &items {
-            Items::Int64(v) => v.iter().map(|&(_, w)| w).sum(),
-            Items::Float64(v) => v.iter().map(|&(_, w)| w).sum(),
+            Items::Int64(v) => v.iter().map(|&(_, w)| u128::from(w)).sum(),
+            Items::Float64(v) => v.iter().map(|&(_, w)| u128::from(w)).sum(),
         };
         if total_weight == 0 {
             return Err(Error::InvalidState("KLL sketch has no items".into()));
@@ -160,6 +161,8 @@ impl KllSketch {
     ///
     /// # Errors
     /// `phi` outside `[0, 1]` (or NaN).
+    // Exact comparisons on purpose: phi = 0 and phi = 1 return the stored min and max.
+    #[allow(clippy::float_cmp)]
     pub fn point(&self, phi: f64) -> Result<KllValue> {
         if !(0.0..=1.0).contains(&phi) {
             return Err(Error::InvalidState(format!(
@@ -178,9 +181,9 @@ impl KllSketch {
     /// The first item (by value) whose cumulative weight reaches `target`.
     fn at_weight(&self, target: f64) -> KllValue {
         fn pick<T: Copy>(items: &[(T, u64)], target: f64) -> T {
-            let mut cum = 0u64;
+            let mut cum = 0u128;
             for &(v, w) in items {
-                cum += w;
+                cum += u128::from(w);
                 if cum as f64 >= target {
                     return v;
                 }

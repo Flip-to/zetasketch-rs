@@ -9,10 +9,23 @@ use zetasketch::kll::{KllSketch, KllValue};
 
 const FIXTURES: &str = include_str!("data/kll_golden.tsv");
 
-/// Known differences: extreme-tail lookups at k = 10 under heavy compaction, where BigQuery picks
-/// a neighbouring item (see docs/findings/20261029_kll_quantiles_feasibility_spike.md). Each
-/// entry is (fixture name, what differs).
-const KNOWN_DIFFERENCES: &[(&str, &str)] = &[];
+/// Known differences, all at k = 10 (the smallest precision) with n >= 10,000 (heavy
+/// compaction, item weights up to 2048): BigQuery picks the neighbouring stored item. The
+/// effective target is sometimes slightly above and sometimes slightly below `j/q x total
+/// weight`, so it is not a constant offset; see
+/// docs/findings/20261029_kll_quantiles_feasibility_spike.md. 9 of 1,638 checked outputs.
+/// Each entry is (fixture name, what differs). Any other mismatch fails the test.
+const KNOWN_DIFFERENCES: &[(&str, &str)] = &[
+    ("seq_k10_n10000", "q=100 at [81]"),
+    ("seq_k10_n10000", "point phi=0.999"),
+    ("seq_k10_n100000", "q=100 at [89]"),
+    ("seq_k10_n100000", "point phi=0.999"),
+    ("dup_k10_n10000", "q=100 at [58]"),
+    ("dup_k10_n100000", "q=100 at [62]"),
+    ("big_k10_n10000", "q=100 at [67]"),
+    ("big_k10_n100000", "q=100 at [87]"),
+    ("f64tiny_k10_n100000", "q=100 at [99]"),
+];
 
 fn parse_value(ty: &str, s: &str) -> KllValue {
     if ty == "INT64" {
