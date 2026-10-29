@@ -1,5 +1,6 @@
 ---
-status: accepted
+status: superseded
+superseded_by: docs/decisions/20261029_dense_estimate_exact_histogram.md
 kind: developer
 who: "Agent: Claude (session 8b72ee89-5aeb-409a-b8be-e395357ed26a), approved by Yuri Olive"
 ticket: None
