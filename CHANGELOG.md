@@ -39,6 +39,10 @@ All notable changes to this crate. The format follows
   resume the fast path after one reference merge. Mixed-precision bench: 40.9 to 17.2 us per
   sketch (3.1x faster than the reference fold).
 
+- Dense estimates (`estimate`, `cardinality`) sum a register histogram exactly instead of
+  looping in f64: 19.9 to 8.0 us at p = 15. Results are bit-identical, with the proof in
+  `docs/decisions/20261029_dense_estimate_exact_histogram.md`.
+
 ### Internal
 
 - Ported Java ZetaSketch's own unit tests: 74 public-API tests in

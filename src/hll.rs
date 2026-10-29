@@ -158,18 +158,9 @@ pub(crate) fn validate_header(view: &StateView<'_>) -> Result<u8> {
     Ok(allowed)
 }
 
-/// HLL++ estimate over dense registers (Java `NormalRepresentation.estimate`). Sums in register
-/// order on purpose: DECISION(dense_estimate_sequential_sum).
+/// HLL++ estimate over dense registers (Java `NormalRepresentation.estimate`).
 pub(crate) fn dense_estimate(data: &[u8], p: i32) -> i64 {
-    let mut num_zeros = 0u32;
-    let mut sum = 0.0f64;
-    for &v in data {
-        if v == 0 {
-            num_zeros += 1;
-        }
-        // Exactly 1.0 / 2^v (v <= 61 after validation).
-        sum += f64::from_bits((1023 - u64::from(v)) << 52);
-    }
+    let (sum, num_zeros) = register_harmonic_sum(data, p);
     let m = f64::from(1i32 << p);
     if num_zeros > 0 {
         let h = m * (m / f64::from(num_zeros)).ln();
@@ -179,6 +170,60 @@ pub(crate) fn dense_estimate(data: &[u8], p: i32) -> i64 {
     }
     let e = estimate::alpha(p) * m * m / sum;
     estimate::java_round(e - estimate::estimate_bias(e, p))
+}
+
+/// `sum(2^-v)` over the registers and the number of zero registers, bit-identical to Java's
+/// sequential f64 loop. DECISION(dense_estimate_exact_histogram)
+///
+/// Every term is `2^-v`, so every partial sum is a multiple of `2^-vmax` no larger than `2^p`.
+/// When `p + vmax <= 53` each partial sum fits f64's 53-bit significand exactly, so the
+/// sequential loop never rounds and equals the exact sum. A histogram summed in integers and
+/// converted once then gives the same bits, without the loop's floating-point dependency
+/// chain. `vmax > 53 - p` needs a hash with that many leading zeros after the index (about
+/// 2^-38 per value at p = 15), so the sequential fallback is effectively never taken.
+pub(crate) fn register_harmonic_sum(data: &[u8], p: i32) -> (f64, u32) {
+    // Four interleaved histograms so runs of equal registers don't serialize on one counter.
+    let mut h = [[0u32; 64]; 4];
+    let mut chunks = data.chunks_exact(4);
+    for c in &mut chunks {
+        h[0][usize::from(c[0] & 63)] += 1;
+        h[1][usize::from(c[1] & 63)] += 1;
+        h[2][usize::from(c[2] & 63)] += 1;
+        h[3][usize::from(c[3] & 63)] += 1;
+    }
+    for &v in chunks.remainder() {
+        h[0][usize::from(v & 63)] += 1;
+    }
+    let mut hist = [0u32; 64];
+    for (i, bin) in hist.iter_mut().enumerate() {
+        *bin = h[0][i] + h[1][i] + h[2][i] + h[3][i];
+    }
+    // Validated registers are <= 65 - p <= 61, so `& 63` never folds two values together.
+    let vmax = hist.iter().rposition(|&c| c > 0).unwrap_or(0) as u8;
+    if i32::from(vmax) + p <= 53 {
+        let mut scaled: u64 = 0; // sum * 2^vmax, < 2^53
+        for (v, &count) in hist.iter().enumerate().take(usize::from(vmax) + 1) {
+            scaled += u64::from(count) << (u32::from(vmax) - v as u32);
+        }
+        // `scaled` < 2^53 converts exactly; dividing by a power of two is exact.
+        let sum = scaled as f64 / f64::from_bits((1023 + u64::from(vmax)) << 52);
+        return (sum, hist[0]);
+    }
+    sequential_harmonic_sum(data)
+}
+
+/// Java's loop, in register order: the reference for `register_harmonic_sum`.
+pub(crate) fn sequential_harmonic_sum(data: &[u8]) -> (f64, u32) {
+    let mut num_zeros = 0u32;
+    let mut sum = 0.0f64;
+    for &v in data {
+        if v == 0 {
+            num_zeros += 1;
+        }
+        // Exactly 1.0 / 2^v (v <= 61 after validation).
+        sum += f64::from_bits((1023 - u64::from(v)) << 52);
+    }
+    (sum, num_zeros)
 }
 
 /// Linear counting over the sparse buckets (Java `SparseRepresentation.estimate`).
@@ -825,4 +870,52 @@ fn sorted_values(state: &State, buf: &SparseBuffer) -> Result<Option<Vec<u32>>> 
         (Some(a), Some(b)) => Some(encoding::merge_sorted(&a, &b)),
         (a, b) => a.or(b),
     })
+}
+
+#[cfg(test)]
+mod harmonic_sum_tests {
+    use super::*;
+
+    #[test]
+    fn histogram_sum_is_bit_identical_to_sequential() {
+        let mut seed = 0x0123_4567_89ab_cdefu64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for p in [4, 10, 12, 15, 18] {
+            let m = 1usize << p;
+            let max_rho = 65 - p as u64;
+            for case in 0..60 {
+                let regs: Vec<u8> = (0..m)
+                    .map(|_| {
+                        let r = next();
+                        match case % 4 {
+                            // HLL-like: geometric rho, many zeros early on.
+                            0 => {
+                                (r.trailing_zeros() as u64 + 1).min(max_rho) as u8
+                                    * u8::from(r % 3 != 0)
+                            }
+                            1 => (r % 12) as u8,
+                            // Occasional huge registers: exercises the sequential fallback.
+                            2 => {
+                                if r % 997 == 0 {
+                                    (r % max_rho + 1) as u8
+                                } else {
+                                    (r % 8) as u8
+                                }
+                            }
+                            _ => (r % (max_rho + 1)) as u8,
+                        }
+                    })
+                    .collect();
+                let fast = register_harmonic_sum(&regs, p);
+                let slow = sequential_harmonic_sum(&regs);
+                assert_eq!(fast.0.to_bits(), slow.0.to_bits(), "p={p} case={case}");
+                assert_eq!(fast.1, slow.1, "p={p} case={case}");
+            }
+        }
+    }
 }
