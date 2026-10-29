@@ -25,7 +25,6 @@ pub mod hash;
 mod hll;
 #[cfg(test)]
 mod java_internal_tests;
-pub mod kll;
 mod proto;
 
 pub use accumulator::Accumulator;
