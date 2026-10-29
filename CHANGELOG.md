@@ -4,6 +4,22 @@ All notable changes to this crate. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org/) (pre-1.0: a minor bump may break the API).
 
+## [Unreleased]
+
+### Performance
+
+- Folds of mid-size sparse sketches (hundreds to thousands of values) that keep the union
+  sparse near the sparse -> dense threshold: in-place insertion is now limited to 16 values
+  (inserting hundreds cost ~50 us per sketch from moving memory), and deferred values plus the
+  current input are merged into the union in one pass after a run-aware sort. On
+  `examples/midsize_probe.rs`, inputs into a sparse accumulator go from 54 to 36 us.
+
+### Added
+
+- `docs/guides/real_data_validation.md` and `examples/validate_groups.rs`: check `Accumulator`
+  against BigQuery `HLL_COUNT.MERGE` / `MERGE_PARTIAL` on your own exported groups, privately.
+  CI runs it on a synthetic self-check and on the committed BigQuery merge fixtures.
+
 ## [0.2.1] - 2026-10-29
 
 ### Added

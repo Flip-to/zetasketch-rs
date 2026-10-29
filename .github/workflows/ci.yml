@@ -99,6 +99,12 @@ jobs:
           uv run ruff format --check scripts tests/python
       - name: Pytest (Python tooling)
         run: uv run pytest
+      - name: Real-data validation checker (self-check + committed BigQuery merge fixtures)
+        run: |
+          cargo run --release --quiet --example validate_groups -- --self-check
+          python3 scripts/fixtures_to_group_tsv.py /tmp/groups
+          cargo run --release --quiet --example validate_groups -- /tmp/groups/rows.tsv /tmp/groups/expected.tsv
+          cargo run --release --quiet --example validate_groups -- /tmp/groups/rows.tsv /tmp/groups/expected.tsv --trusted
 
   semver:
     name: SemVer check against crates.io
