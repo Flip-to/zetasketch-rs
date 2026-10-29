@@ -139,11 +139,19 @@ jobs:
           git init -q /tmp/zetasketch
           git -C /tmp/zetasketch fetch -q --depth 1 https://github.com/google/zetasketch.git "$ZETASKETCH_COMMIT"
           git -C /tmp/zetasketch checkout -q FETCH_HEAD
-          cd /tmp/zetasketch && JAVA_HOME="$JAVA_HOME_17_X64" ./gradlew -q --no-daemon shadowJar
-          ls build/libs
+          # Throwaway clone: add a task that prints the full runtime classpath (compiled classes
+          # plus every dependency jar). The shaded jar does not bundle all runtime dependencies.
+          cat >> /tmp/zetasketch/build.gradle <<'GRADLE'
+          tasks.register('printRuntimeClasspath') {
+              dependsOn classes
+              doLast { println sourceSets.main.runtimeClasspath.asPath }
+          }
+          GRADLE
+          cd /tmp/zetasketch && JAVA_HOME="$JAVA_HOME_17_X64" ./gradlew -q --no-daemon printRuntimeClasspath > /tmp/classpath.txt
+          tail -c 300 /tmp/classpath.txt
       - name: Compile the oracle
         run: |
-          JAR=$(ls /tmp/zetasketch/build/libs/*-all.jar | head -n1)
+          JAR=$(tail -n1 /tmp/classpath.txt)
           echo "JAR=$JAR" >> "$GITHUB_ENV"
           "$JAVA_HOME_17_X64/bin/javac" -cp "$JAR" -d /tmp/oracle oracle/Oracle.java
       - name: Random scenarios through both implementations
