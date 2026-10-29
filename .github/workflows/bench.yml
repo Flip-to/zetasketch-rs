@@ -1,0 +1,45 @@
+name: Benchmarks (informational)
+
+# Reproducible numbers on a Linux x86-64 runner, posted to the run's job summary. Never fails a
+# PR on speed: shared runners are noisy, so read trends across runs, not single values.
+on:
+  pull_request:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: bench-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  bench:
+    name: Fold benchmarks (ubuntu-24.04)
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-${{ runner.os }}-bench-${{ hashFiles('Cargo.lock') }}
+      - name: Build
+        run: cargo build --release --benches --examples
+      - name: Run
+        run: |
+          {
+            echo "## Benchmarks ($(nproc) vCPU, $(grep -m1 'model name' /proc/cpuinfo | cut -d: -f2 | xargs))"
+            echo '```'
+            cargo bench --bench fold 2>/dev/null | grep -E '^==|ns/sketch|speedup'
+            for ex in group_by group_by_split tiny_fold dense_into_dense sparse_into_dense estimate_cost; do
+              cargo run --release --quiet --example "$ex" 2>/dev/null
+            done
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"

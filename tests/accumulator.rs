@@ -390,3 +390,29 @@ fn reads_during_deferred_merges_match_reference_at_every_step() {
         assert_eq!(acc.estimate(), reference.estimate(), "p={p} final");
     }
 }
+
+/// Long same-precision folds of mid-size sparse sketches cross the pending cap many times before
+/// the sparse -> dense threshold. Every step must still match the reference.
+#[test]
+fn pending_cap_flushes_stay_exact() {
+    let mut rng = Rng(0x00ca_9f15);
+    let inputs: Vec<Vec<u8>> = (0..300)
+        .map(|_| {
+            let mut s = HyperLogLogPlusPlus::for_longs(15).unwrap();
+            let start = rng.below(10_000_000) as i64;
+            for v in start..start + 20 + rng.below(30) as i64 {
+                s.add_long(v).unwrap();
+            }
+            s.serialize()
+        })
+        .collect();
+    let mut reference = HyperLogLogPlusPlus::from_bytes(&inputs[0]).unwrap();
+    let mut acc = Accumulator::new();
+    acc.add_bytes(&inputs[0]).unwrap();
+    for (i, b) in inputs.iter().enumerate().skip(1) {
+        reference.merge_bytes(b).unwrap();
+        acc.add_bytes(b).unwrap();
+        assert_eq!(acc.cardinality(), reference.cardinality(), "step {i}");
+    }
+    assert_eq!(acc.serialize().unwrap(), reference.serialize());
+}
