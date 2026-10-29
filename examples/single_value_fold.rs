@@ -88,7 +88,18 @@ fn sparse_phase(name: &str, singles: &[Vec<u8>], n: usize) {
         best = best.min(t.elapsed().as_nanos() as f64 / (reps * n) as f64);
         std::hint::black_box(acc.cardinality());
     }
-    println!("{name:<42} {best:6.1} ns per sketch");
+    // A dense sketch serializes to its registers (32 KiB); a sparse one stays below the 24,576-byte
+    // normalization threshold, so the length tells which phase the last accumulator ended in.
+    let mut acc = Accumulator::new();
+    for b in &singles[..n] {
+        acc.add_bytes(b).unwrap();
+    }
+    let ends = if acc.serialize().is_some_and(|b| b.len() > 30_000) {
+        "dense"
+    } else {
+        "sparse"
+    };
+    println!("{name:<42} {best:6.1} ns per sketch (ends {ends})");
 }
 
 fn main() {

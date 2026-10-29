@@ -920,6 +920,7 @@ mod tests {
             let mut acc = Accumulator::new();
             let mut reference: Option<HyperLogLogPlusPlus> = None;
             let mut saw_sparse_after_first = false;
+            let mut saw_pending = false;
             for i in 0..4000 {
                 let values = 1 + next() % 20; // 17 to 20 values leave the small path
                 let bytes = sketch_of(&mut next, values);
@@ -933,6 +934,7 @@ mod tests {
                     None => reference = Some(HyperLogLogPlusPlus::from_bytes(&bytes).unwrap()),
                 }
                 saw_sparse_after_first |= i > 0 && !acc.dense;
+                saw_pending |= !acc.pending.is_empty();
                 if i % 97 == 0 || i == 3999 {
                     let mut want = reference.clone().unwrap();
                     assert_eq!(
@@ -945,7 +947,124 @@ mod tests {
                 }
             }
             assert!(saw_sparse_after_first, "the sparse phase was exercised");
+            assert!(saw_pending, "inputs were deferred, so the new branch ran");
             assert!(acc.dense, "4,000 inputs end dense");
+        }
+    }
+
+    /// A p = 15 INT64 sketch of `values` consecutive values from a pseudo-random start.
+    fn sketch_n(next: &mut impl FnMut() -> u64, values: u64) -> Vec<u8> {
+        sketch_of(next, values)
+    }
+
+    /// Feeds `inputs` to an accumulator and to the reference fold, step by step. Every step must
+    /// agree on success or failure and, once something has been added, on the serialized bytes, the
+    /// estimate and the value count (also right after a rejected input, which must change nothing).
+    /// Returns the accumulator.
+    fn fold_and_compare(inputs: &[Vec<u8>], trusted: bool, every_step: bool) -> Accumulator {
+        let mut acc = Accumulator::new();
+        let mut reference: Option<HyperLogLogPlusPlus> = None;
+        for (i, bytes) in inputs.iter().enumerate() {
+            let got = if trusted {
+                acc.add_trusted_bytes(bytes)
+            } else {
+                acc.add_bytes(bytes)
+            };
+            let want = if let Some(r) = reference.as_mut() {
+                r.merge_bytes(bytes)
+            } else {
+                HyperLogLogPlusPlus::from_bytes(bytes).map(|s| reference = Some(s))
+            };
+            assert_eq!(got.is_ok(), want.is_ok(), "step {i}, trusted {trusted}");
+            if every_step || i + 1 == inputs.len() {
+                if let Some(r) = &reference {
+                    let mut want = r.clone();
+                    assert_eq!(acc.estimate(), want.estimate(), "estimate, step {i}");
+                    assert_eq!(acc.num_values(), want.num_values(), "count, step {i}");
+                    assert_eq!(
+                        acc.serialize().unwrap(),
+                        want.serialize(),
+                        "bytes, step {i}"
+                    );
+                }
+            }
+        }
+        acc
+    }
+
+    /// The cases around the small-input path: 16 and 17 values (the limit), an input of another
+    /// value type or precision arriving while the accumulator is sparse, dense and empty inputs,
+    /// the 2,048-value pending cap checked at every step, and reuse after `reset`.
+    #[test]
+    fn small_sparse_edge_cases_match_reference() {
+        let mut next = rng(0x1234_5678_9abc_def1);
+        let strings = {
+            let mut s = HyperLogLogPlusPlus::for_strings(15).unwrap();
+            s.add_str("a string value").unwrap();
+            s.serialize()
+        };
+        let other_precision = {
+            let mut s = HyperLogLogPlusPlus::for_longs(14).unwrap();
+            for v in 0..4 {
+                s.add_long(v).unwrap();
+            }
+            s.serialize()
+        };
+        for trusted in [false, true] {
+            // 16 values take the small path, 17 do not; a STRING sketch is rejected while sparse.
+            let a = [
+                sketch_n(&mut next, 5),
+                sketch_n(&mut next, 16),
+                sketch_n(&mut next, 17),
+                strings.clone(),
+                sketch_n(&mut next, 3),
+                sketch_n(&mut next, 1),
+            ];
+            let mut acc = fold_and_compare(&a, trusted, true);
+            // Reuse after reset equals a fresh accumulator.
+            acc.reset();
+            let again = [sketch_n(&mut next, 4), sketch_n(&mut next, 4)];
+            for b in &again {
+                acc.add_bytes(b).unwrap();
+            }
+            let fresh = fold_and_compare(&again, trusted, true);
+            assert_eq!(acc.serialize(), fresh.serialize());
+
+            // Another precision while sparse, then more small inputs.
+            let b = [
+                sketch_n(&mut next, 5),
+                other_precision.clone(),
+                sketch_n(&mut next, 3),
+                sketch_n(&mut next, 2),
+            ];
+            fold_and_compare(&b, trusted, true);
+
+            // A dense input first, then small ones; and small ones, a dense input, small ones.
+            let c = [
+                sketch_n(&mut next, 50_000),
+                sketch_n(&mut next, 3),
+                sketch_n(&mut next, 16),
+                sketch_n(&mut next, 17),
+            ];
+            fold_and_compare(&c, trusted, true);
+            let d = [
+                sketch_n(&mut next, 2),
+                sketch_n(&mut next, 50_000),
+                sketch_n(&mut next, 3),
+            ];
+            fold_and_compare(&d, trusted, true);
+
+            // An empty input in the middle changes nothing.
+            let e = [sketch_n(&mut next, 3), Vec::new(), sketch_n(&mut next, 2)];
+            fold_and_compare(&e, trusted, true);
+
+            // Singles across the pending cap (2,048 values) and past it, compared at every step.
+            let singles: Vec<Vec<u8>> = (0..2_150).map(|_| sketch_n(&mut next, 1)).collect();
+            let acc = fold_and_compare(&singles, trusted, true);
+            assert!(
+                !acc.dense,
+                "2,150 singles are still below the dense threshold"
+            );
         }
     }
 }
