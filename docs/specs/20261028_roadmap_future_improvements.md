@@ -107,13 +107,43 @@ decoding and scattered register writes. Candidates: branch-light varint decoding
 validate and apply for dense targets. Only worth doing if a consumer benchmark shows sparse
 inputs dominate.
 
-### 5. Upstream the Java downgrade bug
+### 5. Upstream the Java downgrade bug (and notify zetasketch-cpp)
 
 File an issue on `google/zetasketch` with a failing JUnit test: on a p11, p13, p10 merge chain,
 `SparseRepresentation.downgrade` re-adds buffered values without converting them. See
 `docs/tech_debt/sparse_downgrade_buffer_encoding.md`. The repo is synced from Google's internal
 code with Copybara and external PRs are rarely merged, so lead with the issue. It is unrelated to
 open PR #18, which fixes the read position of the merge source.
+
+### 6. Live differential oracle against zetasketch-cpp and Java ZetaSketch
+
+Parity evidence today comes from vectors generated once: the zetasketch-cpp golden corpus (made
+with Java ZetaSketch), Java's own unit tests ported to Rust, and BigQuery fixtures. A live oracle
+would compare random inputs with the reference implementations continuously:
+
+- an `oracle/` directory that pins zetasketch-cpp and Java ZetaSketch by commit and builds them
+  only in a dedicated CI job or container, so contributors never need Bazel or a JDK;
+- a differential fuzz target, or a nightly job, that feeds the same random add/merge/serialize
+  sequences to this crate and the oracles and compares estimates and bytes;
+- documented expected differences (the fixed Java downgrade bug, stricter decode validation),
+  so they are not reported as failures.
+
+### 7. Consumer guidance: parity and benchmarks on real data
+
+This repository's fixtures are synthetic by design (`DECISION(synthetic_fixtures_only)`). Real
+deployments should also check, in their own private test suites:
+
+- **Real-sketch parity:** sample stored `HLL_COUNT.INIT` sketches, fold them with `Accumulator`
+  by the groupings the application really uses, and compare with `HLL_COUNT.MERGE` /
+  `HLL_COUNT.EXTRACT` (and `MERGE_PARTIAL` bytes) over the same rows. Real sketches have size and
+  sparsity distributions that synthetic grids only approximate.
+- **Real-workload benchmark:** merges per second per core on the real sketch mix, on the target
+  hardware. Compare decoding stored bytes per request with keeping sketches pre-decoded, since
+  the trade-off depends on the mix. `examples/` and `benches/fold.rs` are starting points; their
+  numbers come from one development machine.
+
+The deliverable here is a short guide (`docs/guides/real_data_validation.md`) with a template
+test and benchmark that a consumer can copy. No real data is ever committed to this repository.
 
 ### Out of scope
 
@@ -139,6 +169,7 @@ internal results.
 1. Port the Java unit tests and add the API conveniences (items 1 and 2), one PR.
 2. KLL spike (item 3), reported as a `docs/findings/` file before any KLL API is published.
 3. Items 4 and 5 when a consumer or a maintainer response justifies them.
+4. Item 7 (consumer guide) next; item 6 (live oracle) when a CI container budget is available.
 
 ## Verification
 
@@ -147,4 +178,8 @@ internal results.
 - Item 2: doctests and unit tests for each new accessor.
 - Item 3: the spike's finding shows exact `EXTRACT` on synthetic single sketches, and a measured
   answer on whether merges are byte-reproducible.
+- Item 6: an oracle CI job runs on a schedule and agrees with this crate on random sequences,
+  apart from the documented differences.
+- Item 7: the guide's template test and benchmark compile against the published crate and run on
+  synthetic data in CI, so they stay current.
 - Item 4: `cargo bench --bench fold` improves on sparse inputs with `tests/accumulator.rs` still green.

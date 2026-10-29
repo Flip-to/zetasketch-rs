@@ -90,11 +90,13 @@ Design and decisions live in [`docs/`](docs/README.md). Contributor and agent ru
 Planned work, ranked by priority and risk, is in
 [`docs/specs/20261028_roadmap_future_improvements.md`](docs/specs/20261028_roadmap_future_improvements.md):
 
-- port Java ZetaSketch's own unit tests;
-- API conveniences;
-- native BigQuery KLL quantiles (`KLL_QUANTILES`), with a feasibility spike first;
-- faster sparse folds;
-- reporting the Java downgrade bug upstream.
+- done: Java ZetaSketch's own unit tests (171) are ported, and the API conveniences are in;
+- done: faster folds (sparse-heavy and mixed precision);
+- native BigQuery KLL quantiles (`KLL_QUANTILES`): the feasibility spike is done, see
+  `docs/findings/`;
+- reporting the Java downgrade bug upstream;
+- a live differential oracle against zetasketch-cpp and Java ZetaSketch;
+- a guide for validating parity and performance on your own real data.
 
 ## Differences from Java ZetaSketch
 
