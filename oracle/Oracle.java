@@ -96,8 +96,7 @@ public final class Oracle {
                 + " ("
                 + f[0]
                 + "): "
-                + String.valueOf(e.getMessage()).replace('
-', ' ');
+                + String.valueOf(e.getMessage()).replace('\n', ' ');
         if (f[0].equals("E")) {
           out.println("EXC " + failure);
         }
