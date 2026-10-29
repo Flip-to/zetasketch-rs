@@ -368,6 +368,12 @@ pub(crate) fn decode_validated_into(bytes: &[u8], enc: Sparse, out: &mut Vec<u32
     let n = bytes.len();
     let mut pos = 0;
     let mut last = 0u32;
+    // A valid stream is non-decreasing, and every plain value (< 2^sp) sorts below every
+    // rho-encoded one (>= the flag). So the range checks of `Sparse::is_valid` are monotone and
+    // only need the last plain and the last rho-encoded value, after the loop. Per value only the
+    // wrap-around check and the rho-encoded rhoW' bound remain.
+    let mut last_plain: Option<u32> = None;
+    let max_rho = (65 - enc.sparse_precision).clamp(0, 63) as u32;
     while pos < n {
         let mut b = u32::from(bytes[pos]);
         pos += 1;
@@ -390,11 +396,23 @@ pub(crate) fn decode_validated_into(bytes: &[u8], enc: Sparse, out: &mut Vec<u32
                 shift += 7;
             }
         }
-        last = last.wrapping_add(delta);
-        if last > i32::MAX as u32 || !enc.is_valid(last) {
+        let next = last.wrapping_add(delta);
+        if next < last {
             return Err(Error::CorruptSparseData("value out of range"));
         }
+        last = next;
+        if enc.is_rho_encoded(last) {
+            if last & RHOW_MASK > max_rho {
+                return Err(Error::CorruptSparseData("value out of range"));
+            }
+        } else {
+            last_plain = Some(last);
+        }
         out.push(last);
+    }
+    let in_range = |v: u32| i32::try_from(v).is_ok() && enc.is_valid(v);
+    if last_plain.is_some_and(|v| !in_range(v)) || (!out.is_empty() && !in_range(last)) {
+        return Err(Error::CorruptSparseData("value out of range"));
     }
     Ok(())
 }
@@ -653,5 +671,71 @@ mod sparse_iter_error_tests {
             Err(Error::CorruptSparseData("negative value"))
         );
         assert_eq!(decode_sparse(&[0x01, 0x02, 0x7f]), Ok(vec![1, 3, 130]));
+    }
+}
+
+#[cfg(test)]
+mod validated_decode_equivalence_tests {
+    use super::*;
+
+    /// The previous decoder: `Sparse::is_valid` on every value. Reference for the end-of-stream
+    /// range checks.
+    fn per_value_reference(bytes: &[u8], enc: Sparse) -> Result<Vec<u32>> {
+        let mut out = Vec::new();
+        let mut it = SparseIter::new(bytes);
+        let mut last = 0u32;
+        for v in it.by_ref() {
+            if v < last {
+                // Wrapped past 2^32: rejected by the new decoder, documented as stricter.
+                return Err(Error::CorruptSparseData("value out of range"));
+            }
+            last = v;
+            if !enc.is_valid(v) {
+                return Err(Error::CorruptSparseData("value out of range"));
+            }
+            out.push(v);
+        }
+        it.error()?;
+        Ok(out)
+    }
+
+    #[test]
+    fn end_of_stream_checks_match_per_value_checks() {
+        let mut seed = 0xabcd_ef01_2345_6789u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for (p, sp) in [(15, 20), (10, 15), (4, 25), (12, 12), (24, 25)] {
+            let enc = Sparse::new(p, sp);
+            for round in 0..3_000 {
+                let count = (next() % 200) as usize;
+                let mut values: Vec<u32> = (0..count).map(|_| enc.encode_hash(next())).collect();
+                values.sort_unstable();
+                values.dedup();
+                // Sometimes push a value just past a range edge.
+                match round % 5 {
+                    1 => values.push((1u32 << sp) | 1),
+                    2 => values.push(u32::MAX >> 1),
+                    _ => {}
+                }
+                values.sort_unstable();
+                let mut bytes = encode_sparse(&values);
+                if round % 3 == 0 && !bytes.is_empty() {
+                    let i = (next() as usize) % bytes.len();
+                    bytes[i] ^= 1 << (next() % 8);
+                }
+                let mut fast = Vec::new();
+                let fast_r = decode_validated_into(&bytes, enc, &mut fast);
+                let slow = per_value_reference(&bytes, enc);
+                match (&fast_r, &slow) {
+                    (Ok(()), Ok(v)) => assert_eq!(&fast, v, "p={p} sp={sp} round={round}"),
+                    (Err(_), Err(_)) => {}
+                    _ => panic!("accept/reject differs: p={p} sp={sp} round={round} fast={fast_r:?} slow={slow:?}"),
+                }
+            }
+        }
     }
 }

@@ -20,6 +20,12 @@ All notable changes to this crate. The format follows
   sorting. The proof is in `docs/decisions/20261029_deferred_sparse_merges.md`. On a grouped
   request (`examples/group_by.rs`: 1,000 groups x 17 metrics x 30 small sketches) this goes from
   655 to about 210 ms (3.1x); sparse-heavy fold bench about 0.2–0.4 us per sketch, from 1.7.
+- Faster parsing and validation: 1-byte fast path in the proto varint reader (parse and header
+  checks 144 to 52 ns for a 95-byte sketch), and range checks of the validated sparse decoder
+  done once at the end of the stream instead of per value (30 values 230 to 60 ns). A valid
+  stream is non-decreasing and plain values sort below rho-encoded ones, so the checks are
+  monotone. A stream whose deltas wrap past 2^32 is now rejected (it was accepted as an unsorted
+  stream). Grouped request (`examples/group_by.rs`) about 192 ms.
 - Deferred sparse values are capped at 2,048 per accumulator (8 KiB): memory stays bounded when a
   request holds thousands of accumulators. Flushing earlier is exact.
 - Accumulator scratch buffers are lent from a per-thread pool, so idle accumulators hold no

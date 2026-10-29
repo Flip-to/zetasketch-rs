@@ -265,6 +265,13 @@ impl<'a> Reader<'a> {
     }
 
     fn varint64(&mut self) -> Result<u64> {
+        // Tags and most header fields are one byte.
+        if let Some(&b) = self.buf.get(self.pos) {
+            if b < 0x80 {
+                self.pos += 1;
+                return Ok(u64::from(b));
+            }
+        }
         let mut result = 0u64;
         for i in 0..10 {
             let b = *self
