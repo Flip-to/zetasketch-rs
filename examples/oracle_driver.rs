@@ -7,9 +7,10 @@
 //! merges of earlier emitted sketches), runs them through this crate, and writes the ops plus
 //! this crate's output in the oracle's format. CI runs the same ops through Java and diffs.
 //!
-//! Merges only ever bring in sketches of equal or *higher* precision than the current one, or
-//! lower it once; a lower -> higher -> lower chain would hit the known Java downgrade bug
-//! (`docs/tech_debt/sparse_downgrade_buffer_encoding.md`), which this crate fixes on purpose.
+//! Merges only ever bring in sketches of equal or *higher* precision than the current one. Java
+//! mishandles lowering merges (adds after a lowering index with the old precision and throw
+//! `IndexOutOfBoundsException`; see also `docs/tech_debt/sparse_downgrade_buffer_encoding.md`),
+//! so lowering is covered by the BigQuery fixtures instead.
 
 use std::fmt::Write as _;
 use std::process::ExitCode;
@@ -94,28 +95,22 @@ fn main() -> ExitCode {
             HyperLogLogPlusPlus::for_longs(p)
         }
         .unwrap();
-        let mut current_p = p;
-        let mut lowered = false;
+        let current_p = p;
         for _ in 0..=rng.below(3) {
             // Maybe merge an earlier sketch of the same kind first, while the add-buffer is
-            // empty (fresh sketch, or right after an emit, which compacts): equal or higher
-            // precision, or a single lowering. Java mishandles a lowering merge into a sparse
-            // sketch with unflushed adds, the bug this crate fixes.
+            // empty (fresh sketch, or right after an emit, which compacts), of equal or higher
+            // precision only.
             let candidates: Vec<usize> = (0..emitted.len())
                 .filter(|&i| {
                     let (_, ep, es) = &emitted[i];
-                    *es == strings && (*ep >= current_p || !lowered)
+                    *es == strings && *ep >= current_p
                 })
                 .collect();
             if !candidates.is_empty() && rng.below(2) == 0 {
                 let pick = candidates[rng.below(candidates.len() as u64) as usize];
-                let (bytes, ep, _) = &emitted[pick];
+                let (bytes, _, _) = &emitted[pick];
                 writeln!(ops, "M {}", b64(bytes)).unwrap();
                 s.merge_bytes(bytes).unwrap();
-                if *ep < current_p {
-                    current_p = *ep;
-                    lowered = true;
-                }
             }
             // A batch of adds.
             for _ in 0..rng.size(6_000) {
