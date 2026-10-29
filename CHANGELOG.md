@@ -4,7 +4,7 @@ All notable changes to this crate. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and versions follow
 [SemVer](https://semver.org/) (pre-1.0: a minor bump may break the API).
 
-## [0.2.1] - unreleased
+## [0.2.1] - 2026-10-29
 
 ### Added
 
@@ -25,7 +25,8 @@ All notable changes to this crate. The format follows
   done once at the end of the stream instead of per value (30 values 230 to 60 ns). A valid
   stream is non-decreasing and plain values sort below rho-encoded ones, so the checks are
   monotone. A stream whose deltas wrap past 2^32 is now rejected (it was accepted as an unsorted
-  stream). Grouped request (`examples/group_by.rs`) about 192 ms.
+  stream). Local Windows: grouped request about 192 ms. On the Linux CI runner (AMD EPYC 7763)
+  the end-to-end effect is small: tiny-sketch fold 420 to 409 ns, grouped request 229 to 227 ms.
 - Deferred sparse values are capped at 2,048 per accumulator (8 KiB): memory stays bounded when a
   request holds thousands of accumulators. Flushing earlier is exact.
 - Accumulator scratch buffers are lent from a per-thread pool, so idle accumulators hold no
