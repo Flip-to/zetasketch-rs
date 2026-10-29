@@ -6,6 +6,8 @@ All notable changes to this crate. The format follows
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-10-29
+
 ### Performance
 
 - Folds of mid-size sparse sketches (hundreds to thousands of values) that keep the union
@@ -16,6 +18,9 @@ All notable changes to this crate. The format follows
 
 ### Added
 
+- CI differential oracle against Java ZetaSketch (`oracle/Oracle.java`,
+  `examples/oracle_driver.rs`): random INT64 and STRING scenarios, adds interleaved with
+  merges, byte-identical output required.
 - **Experimental** `kll` module: decodes BigQuery `KLL_QUANTILES` sketches (INT64, FLOAT64)
   and extracts quantiles and points. 1,629 of 1,638 BigQuery outputs match on 126 synthetic
   fixtures (`tests/kll_golden.rs`, `scripts/gen_kll_fixtures.py`); the 9 known differences are
