@@ -55,6 +55,13 @@ impl<'a> StateView<'a> {
     }
 
     pub fn parse(bytes: &'a [u8]) -> Result<StateView<'a>> {
+        if let Some(view) = Self::parse_compact(bytes) {
+            return Ok(view);
+        }
+        Self::parse_general(bytes)
+    }
+
+    fn parse_general(bytes: &'a [u8]) -> Result<StateView<'a>> {
         let mut view = StateView {
             r#type: HYPERLOGLOG_PLUS_UNIQUE,
             num_values: 0,
@@ -82,6 +89,81 @@ impl<'a> StateView<'a> {
             }
         }
         Ok(view)
+    }
+
+    /// Fast path for the layout every writer produces for a small sketch: known fields only,
+    /// one-byte tags, one-byte values and lengths (a sparse sketch of under 128 bytes). It makes
+    /// the same assignments the general loop would, in the same order, so a `Some` result equals
+    /// `parse`'s. Anything else (a multi-byte varint, a length of 128 or more as in dense
+    /// sketches, an unknown field, a truncation) returns `None` and the general loop decides,
+    /// including every error. `parse_compact_matches_general` checks the equivalence.
+    #[inline]
+    fn parse_compact(bytes: &'a [u8]) -> Option<StateView<'a>> {
+        // One-byte varint at `i`: the value and the next position.
+        #[inline]
+        fn small(bytes: &[u8], i: usize) -> Option<(i32, usize)> {
+            let b = *bytes.get(i)?;
+            (b < 0x80).then_some((i32::from(b), i + 1))
+        }
+        let mut view = StateView {
+            r#type: HYPERLOGLOG_PLUS_UNIQUE,
+            num_values: 0,
+            encoding_version: DEFAULT_ENCODING_VERSION,
+            value_type: DEFAULT_VALUE_TYPE,
+            sparse_size: 0,
+            precision: 0,
+            sparse_precision: 0,
+            data: None,
+            sparse_data: None,
+        };
+        let mut i = 0;
+        while i < bytes.len() {
+            let tag = u32::from(bytes[i]);
+            // The nested message tag has a two-byte varint (0x82 0x07).
+            if tag == 0x82 {
+                if *bytes.get(i + 1)? != 0x07 {
+                    return None;
+                }
+                let (len, next) = small(bytes, i + 2)?;
+                let end = next + len as usize;
+                let nested = bytes.get(next..end)?;
+                let mut j = 0;
+                while j < nested.len() {
+                    let tag = u32::from(nested[j]);
+                    let (value, next) = small(nested, j + 1)?;
+                    match tag {
+                        SPARSE_SIZE_TAG => view.sparse_size = value,
+                        PRECISION_TAG => view.precision = value,
+                        SPARSE_PRECISION_TAG => view.sparse_precision = value,
+                        SPARSE_DATA_TAG | DATA_TAG => {
+                            let end = next + value as usize;
+                            let field = nested.get(next..end)?;
+                            if tag == DATA_TAG {
+                                view.data = Some(field);
+                            } else {
+                                view.sparse_data = Some(field);
+                            }
+                            j = end;
+                            continue;
+                        }
+                        _ => return None,
+                    }
+                    j = next;
+                }
+                i = end;
+                continue;
+            }
+            let (value, next) = small(bytes, i + 1)?;
+            match tag {
+                TYPE_TAG => view.r#type = value,
+                NUM_VALUES_TAG => view.num_values = i64::from(value),
+                ENCODING_VERSION_TAG => view.encoding_version = value,
+                VALUE_TYPE_TAG => view.value_type = value,
+                _ => return None,
+            }
+            i = next;
+        }
+        Some(view)
     }
 
     fn parse_hll(&mut self, bytes: &'a [u8]) -> Result<()> {
@@ -486,4 +568,61 @@ pub(crate) fn parse_kll(bytes: &[u8]) -> Result<KllRaw> {
         )));
     }
     Ok(raw)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::hll::HyperLogLogPlusPlus;
+
+    /// A `Some` from the compact parser must equal the general parser's result, on valid and on
+    /// mangled input (flipped bytes, truncations, appended bytes).
+    #[test]
+    fn parse_compact_matches_general() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut inputs: Vec<Vec<u8>> = vec![Vec::new(), vec![0x08], vec![0x82], vec![0x82, 0x07]];
+        for precision in [10, 15, 24] {
+            for n in [0u64, 1, 2, 5, 40, 3_000, 40_000] {
+                let mut s = HyperLogLogPlusPlus::for_longs(precision).unwrap();
+                for _ in 0..n {
+                    s.add_long(next() as i64).unwrap();
+                }
+                inputs.push(s.serialize());
+            }
+        }
+        let mut compact_hits = 0;
+        let originals = inputs.len();
+        for k in 0..originals {
+            for _ in 0..200 {
+                let mut m = inputs[k].clone();
+                match next() % 4 {
+                    0 if !m.is_empty() => {
+                        let i = next() as usize % m.len();
+                        m[i] ^= 1 << (next() % 8);
+                    }
+                    1 if !m.is_empty() => m.truncate(next() as usize % m.len()),
+                    2 => m.push(next() as u8),
+                    _ => {}
+                }
+                inputs.push(m);
+            }
+        }
+        for bytes in &inputs {
+            if let Some(fast) = StateView::parse_compact(bytes) {
+                compact_hits += 1;
+                assert_eq!(StateView::parse_general(bytes).unwrap(), fast, "{bytes:?}");
+            }
+        }
+        // The fast path must actually be exercised on small sparse sketches.
+        assert!(
+            compact_hits > originals,
+            "compact parse hit {compact_hits} times"
+        );
+    }
 }
