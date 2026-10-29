@@ -410,7 +410,7 @@ pub(crate) fn decode_validated_into(bytes: &[u8], enc: Sparse, out: &mut Vec<u32
         }
         out.push(last);
     }
-    let in_range = |v: u32| v <= i32::MAX as u32 && enc.is_valid(v);
+    let in_range = |v: u32| i32::try_from(v).is_ok() && enc.is_valid(v);
     if last_plain.is_some_and(|v| !in_range(v)) || (!out.is_empty() && !in_range(last)) {
         return Err(Error::CorruptSparseData("value out of range"));
     }
