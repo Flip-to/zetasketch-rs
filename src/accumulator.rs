@@ -332,7 +332,7 @@ impl Accumulator {
             return;
         }
         let enc = self.encoding();
-        self.pending.sort_unstable();
+        sort_runs(&mut self.pending);
         self.sparse_bytes =
             encoding::merge_dedupe_into(enc, &self.sparse, &self.pending, &mut self.merged);
         std::mem::swap(&mut self.sparse, &mut self.merged);
@@ -588,10 +588,22 @@ impl Accumulator {
             self.pending.extend_from_slice(&self.incoming);
             return;
         }
-        self.flush_pending();
         let enc = self.encoding();
-        // A few values into a big union: insert in place. Otherwise one full merge pass.
-        if self.incoming.len() * 16 <= self.sparse.len() {
+        if !self.pending.is_empty() {
+            // One batch: the deferred values (each deferred step was proven below the threshold)
+            // plus this input, merged into the union in a single pass. The threshold is then
+            // checked right after this input, as in the reference.
+            self.pending.extend_from_slice(&self.incoming);
+            sort_runs(&mut self.pending);
+            self.sparse_bytes =
+                encoding::merge_dedupe_into(enc, &self.sparse, &self.pending, &mut self.merged);
+            std::mem::swap(&mut self.sparse, &mut self.merged);
+            self.pending.clear();
+        } else if self.incoming.len() <= MAX_INSERT && self.incoming.len() * 16 <= self.sparse.len()
+        {
+            // A few values into a big union: insert in place. Each insert shifts the union's tail,
+            // so this only beats one full merge pass for a handful of values, whatever the union's
+            // size (measured: 300 values into a 7k union cost ~50 us/sketch by insertion).
             encoding::insert_dedupe(
                 enc,
                 &mut self.sparse,
@@ -624,6 +636,9 @@ impl Accumulator {
     }
 }
 
+/// Largest input inserted value by value into the sparse union instead of a full merge pass.
+const MAX_INSERT: usize = 16;
+
 /// Most deferred sparse values one accumulator holds before merging them (see `merge_sparse`).
 const MAX_PENDING: usize = 2048;
 
@@ -639,6 +654,14 @@ thread_local! {
     static SCRATCH: std::cell::Cell<Scratch> = std::cell::Cell::new(Scratch::default());
     /// One bit per sparse index, all zero between calls (see `distinct_indices`).
     static INDEX_BITS: std::cell::Cell<Vec<u64>> = const { std::cell::Cell::new(Vec::new()) };
+}
+
+/// Sorts `pending`, which is a concatenation of already sorted runs (each decoded input stream
+/// is ascending). The stable sort detects and merges runs, so this costs about a k-way merge
+/// rather than a full comparison sort.
+#[allow(clippy::stable_sort_primitive)]
+fn sort_runs(values: &mut [u32]) {
+    values.sort();
 }
 
 #[inline]
