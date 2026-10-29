@@ -6,6 +6,16 @@ All notable changes to this crate. The format follows
 
 ## [Unreleased]
 
+### Performance
+
+- Small sparse sketches (a few values, under 128 bytes) fold about 2x faster. A compact proto
+  parse handles the layout writers produce (one-byte tags, values and lengths) and returns to the
+  general parser for anything else, so every error and every unusual input is unchanged. An
+  `Accumulator` that is already dense also folds a sparse input of at most 16 values without
+  touching the scratch buffers. On `examples/single_value_fold.rs` (synthetic single-value
+  sketches into a dense accumulator): about 79 to 41 ns per `add_bytes`, 75 to 33 ns per
+  `add_trusted_bytes`; into a sparse accumulator, 79 to 51 ns.
+
 ## [0.2.2] - 2026-10-29
 
 ### Performance

@@ -114,6 +114,14 @@ impl Accumulator {
     /// Malformed bytes, incompatible precision or value type. The sketch is fully validated
     /// before anything is merged, so on error the accumulator is unchanged.
     pub fn add_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.dense && self.fallback.is_none() && !bytes.is_empty() {
+            let view = StateView::parse(bytes)?;
+            let allowed = hll::validate_header(&view)?;
+            if self.add_small_sparse(&view, allowed, false)? {
+                return Ok(());
+            }
+            return self.with_scratch(|acc| acc.add_view(&view, allowed, false));
+        }
         self.with_scratch(|acc| acc.add_bytes_inner(bytes))
     }
 
@@ -143,6 +151,14 @@ impl Accumulator {
     /// # Errors
     /// Malformed structure, incompatible precision or value type.
     pub fn add_trusted_bytes(&mut self, bytes: &[u8]) -> Result<()> {
+        if self.dense && self.fallback.is_none() && !bytes.is_empty() {
+            let view = StateView::parse(bytes)?;
+            let allowed = hll::validate_structure(&view)?;
+            if self.add_small_sparse(&view, allowed, true)? {
+                return Ok(());
+            }
+            return self.with_scratch(|acc| acc.add_view(&view, allowed, true));
+        }
         self.with_scratch(|acc| {
             if bytes.is_empty() {
                 return Ok(());
@@ -224,6 +240,47 @@ impl Accumulator {
         // In-memory sketches were validated when decoded or built.
         let allowed = hll::validate_structure(&view)?;
         self.add_view(&view, allowed, true)
+    }
+
+    /// The common case in event-grain data, without touching the scratch buffers: a sparse input
+    /// of at most [`encoding::SMALL`] values, same precisions, into a dense accumulator. Decodes
+    /// and validates into a stack array first, so on error the accumulator is unchanged, then does
+    /// exactly what `add_view` does for this case: take the allowed types and the value count, and
+    /// raise one register per value. Returns `false` (nothing changed) for any other input.
+    fn add_small_sparse(
+        &mut self,
+        view: &StateView<'_>,
+        allowed: u8,
+        trusted: bool,
+    ) -> Result<bool> {
+        let Some(sparse) = view.sparse_data.filter(|d| !d.is_empty()) else {
+            return Ok(false);
+        };
+        let types = self.allowed & allowed;
+        if view.has_data()
+            || view.sparse_precision == hll::SPARSE_PRECISION_DISABLED
+            || view.precision != self.precision
+            || view.sparse_precision != self.sparse_precision
+            || types == 0
+        {
+            return Ok(false);
+        }
+        let enc = self.encoding();
+        let mut values = [0u32; encoding::SMALL];
+        let decoded = if trusted {
+            encoding::decode_unvalidated_small(sparse, &mut values)?
+        } else {
+            encoding::decode_validated_small(sparse, enc, &mut values)?
+        };
+        let Some(n) = decoded else {
+            return Ok(false);
+        };
+        self.allowed = types;
+        self.num_values = self.num_values.wrapping_add(view.num_values);
+        for &v in &values[..n] {
+            set_register(&mut self.registers, enc, v);
+        }
+        Ok(true)
     }
 
     fn add_view(&mut self, view: &StateView<'_>, allowed: u8, trusted: bool) -> Result<()> {
@@ -748,5 +805,69 @@ mod tests {
         acc.add_bytes(&bytes).unwrap();
         assert_eq!(acc.estimate(), reference.estimate());
         assert_eq!(acc.serialize().unwrap(), reference.serialize());
+    }
+
+    /// Small sparse inputs into a dense accumulator take a scratch-free path. They must equal the
+    /// reference fold (also with inputs of more than `encoding::SMALL` values, which take the
+    /// general path), and a corrupt one must be rejected with the accumulator unchanged.
+    #[test]
+    fn small_sparse_inputs_into_dense_match_reference() {
+        let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        let mut big = HyperLogLogPlusPlus::for_longs(15).unwrap();
+        for v in 0..50_000 {
+            big.add_long(v).unwrap();
+        }
+        let big = big.serialize(); // dense
+        for trusted in [false, true] {
+            let mut acc = Accumulator::new();
+            let mut reference = HyperLogLogPlusPlus::from_bytes(&big).unwrap();
+            let add = |acc: &mut Accumulator, b: &[u8]| {
+                if trusted {
+                    acc.add_trusted_bytes(b)
+                } else {
+                    acc.add_bytes(b)
+                }
+            };
+            add(&mut acc, &big).unwrap();
+            assert!(acc.dense);
+            for _ in 0..600 {
+                let mut s = HyperLogLogPlusPlus::for_longs(15).unwrap();
+                let n = 1 + next() % 24; // 17 and more values leave the small path
+                let start = (next() % 1_000_000_000) as i64;
+                for v in start..start + n as i64 {
+                    s.add_long(v).unwrap();
+                }
+                let bytes = s.serialize();
+                add(&mut acc, &bytes).unwrap();
+                reference.merge_bytes(&bytes).unwrap();
+            }
+            assert_eq!(acc.estimate(), reference.estimate());
+            assert_eq!(acc.num_values(), reference.num_values());
+            assert_eq!(acc.serialize().unwrap(), reference.serialize());
+        }
+
+        // A tiny input whose value is out of range for its precisions is rejected, and the
+        // accumulator keeps its state.
+        let mut acc = Accumulator::new();
+        acc.add_bytes(&big).unwrap();
+        let before = acc.serialize().unwrap();
+        let mut s = HyperLogLogPlusPlus::for_longs(15).unwrap();
+        s.add_long(7).unwrap();
+        // Well framed, one value of 2^32 - 1: out of range for precisions 15 / 20.
+        let mut state = State::parse(&s.serialize()).unwrap();
+        state.sparse_data = Some(vec![0xff, 0xff, 0xff, 0xff, 0x0f]);
+        let bad = state.view().encode();
+        assert!(StateView::parse(&bad).is_ok());
+        assert!(matches!(
+            acc.add_bytes(&bad),
+            Err(Error::CorruptSparseData(_))
+        ));
+        assert_eq!(acc.serialize().unwrap(), before);
     }
 }

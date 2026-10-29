@@ -365,9 +365,67 @@ fn first_nonzero_after_first(chunk: &[u8]) -> Option<usize> {
 pub(crate) fn decode_validated_into(bytes: &[u8], enc: Sparse, out: &mut Vec<u32>) -> Result<()> {
     out.clear();
     out.reserve(bytes.len());
+    decode_validated_each(bytes, enc, |v| {
+        out.push(v);
+        true
+    })
+    .map(|_| ())
+}
+
+/// Most values [`decode_validated_small`] and [`decode_unvalidated_small`] hold.
+pub(crate) const SMALL: usize = 16;
+
+/// [`decode_validated_into`] for streams of at most [`SMALL`] values, into a caller's array: no
+/// heap use. `Ok(None)` when the stream has more values (nothing is validated then).
+pub(crate) fn decode_validated_small(
+    bytes: &[u8],
+    enc: Sparse,
+    out: &mut [u32; SMALL],
+) -> Result<Option<usize>> {
+    let mut n = 0;
+    let complete = decode_validated_each(bytes, enc, |v| {
+        if n == SMALL {
+            return false;
+        }
+        out[n] = v;
+        n += 1;
+        true
+    })?;
+    Ok(complete.then_some(n))
+}
+
+/// [`decode_unvalidated_into`] for streams of at most [`SMALL`] values, into a caller's array.
+/// `Ok(None)` when the stream has more values.
+pub(crate) fn decode_unvalidated_small(
+    bytes: &[u8],
+    out: &mut [u32; SMALL],
+) -> Result<Option<usize>> {
+    let mut it = SparseIter::new(bytes);
+    let mut n = 0;
+    for v in it.by_ref() {
+        if n == SMALL {
+            return Ok(None);
+        }
+        out[n] = v;
+        n += 1;
+    }
+    it.error()?;
+    Ok(Some(n))
+}
+
+/// The one-pass validating decoder behind [`decode_validated_into`] and
+/// [`decode_validated_small`]. `emit` receives each value and returns false to stop early, in
+/// which case this returns `Ok(false)` without the final range checks.
+#[inline]
+fn decode_validated_each(
+    bytes: &[u8],
+    enc: Sparse,
+    mut emit: impl FnMut(u32) -> bool,
+) -> Result<bool> {
     let n = bytes.len();
     let mut pos = 0;
     let mut last = 0u32;
+    let mut any = false;
     // A valid stream is non-decreasing, and every plain value (< 2^sp) sorts below every
     // rho-encoded one (>= the flag). So the range checks of `Sparse::is_valid` are monotone and
     // only need the last plain and the last rho-encoded value, after the loop. Per value only the
@@ -408,13 +466,16 @@ pub(crate) fn decode_validated_into(bytes: &[u8], enc: Sparse, out: &mut Vec<u32
         } else {
             last_plain = Some(last);
         }
-        out.push(last);
+        if !emit(last) {
+            return Ok(false);
+        }
+        any = true;
     }
     let in_range = |v: u32| i32::try_from(v).is_ok() && enc.is_valid(v);
-    if last_plain.is_some_and(|v| !in_range(v)) || (!out.is_empty() && !in_range(last)) {
+    if last_plain.is_some_and(|v| !in_range(v)) || (any && !in_range(last)) {
         return Err(Error::CorruptSparseData("value out of range"));
     }
-    Ok(())
+    Ok(true)
 }
 
 /// Like [`decode_validated_into`] but without the per-value range check: only the varint framing
