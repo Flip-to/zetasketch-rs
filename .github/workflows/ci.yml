@@ -119,6 +119,49 @@ jobs:
         # Compares against the latest published version on crates.io.
         run: cargo semver-checks check-release
 
+  java-oracle:
+    name: Java ZetaSketch oracle (differential)
+    runs-on: ubuntu-24.04
+    env:
+      ZETASKETCH_COMMIT: d098c49efb5a5bc70eec89c028a38b14b930ca98
+    steps:
+      - uses: actions/checkout@v7
+      - name: Install toolchain
+        run: rustup toolchain install stable --profile minimal && rustup default stable
+      - uses: actions/cache@v6
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-zetasketch-${{ env.ZETASKETCH_COMMIT }}
+      - name: Build Java ZetaSketch at the pinned commit
+        run: |
+          git init -q /tmp/zetasketch
+          git -C /tmp/zetasketch fetch -q --depth 1 https://github.com/google/zetasketch.git "$ZETASKETCH_COMMIT"
+          git -C /tmp/zetasketch checkout -q FETCH_HEAD
+          cd /tmp/zetasketch && JAVA_HOME="$JAVA_HOME_17_X64" ./gradlew -q --no-daemon shadowJar
+          ls build/libs
+      - name: Compile the oracle
+        run: |
+          JAR=$(ls /tmp/zetasketch/build/libs/*-all.jar | head -n1)
+          echo "JAR=$JAR" >> "$GITHUB_ENV"
+          "$JAVA_HOME_17_X64/bin/javac" -cp "$JAR" -d /tmp/oracle oracle/Oracle.java
+      - name: Random scenarios through both implementations
+        run: |
+          cargo build --release --quiet --example oracle_driver
+          for seed in 11 22 33; do
+            ./target/release/examples/oracle_driver "$seed" 150 "/tmp/ops_$seed.txt" "/tmp/rust_$seed.txt"
+            "$JAVA_HOME_17_X64/bin/java" -cp "$JAR:/tmp/oracle" Oracle < "/tmp/ops_$seed.txt" > "/tmp/java_$seed.txt"
+            lines=$(wc -l < "/tmp/rust_$seed.txt")
+            if diff -q "/tmp/rust_$seed.txt" "/tmp/java_$seed.txt" > /dev/null; then
+              echo "seed $seed: $lines emitted sketches identical (bytes and estimate)"
+            else
+              echo "::error::seed $seed: Rust and Java ZetaSketch differ"
+              diff "/tmp/rust_$seed.txt" "/tmp/java_$seed.txt" | cut -c1-200 | head -20
+              exit 1
+            fi
+          done
+
   coverage:
     name: Coverage (cargo-llvm-cov)
     runs-on: ubuntu-24.04
