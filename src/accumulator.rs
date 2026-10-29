@@ -156,6 +156,43 @@ impl Accumulator {
         })
     }
 
+    /// Merges another accumulator's result into this one: exactly
+    /// `self.add_bytes(&other.serialize().unwrap())`, without the serialize/decode round trip.
+    /// That is the reference merge of two partial results, which is also how BigQuery combines
+    /// partial aggregates (`HLL_COUNT.MERGE_PARTIAL` of partials).
+    ///
+    /// Use it to fold chunks of a large input on several threads and then combine the
+    /// per-thread accumulators. Merging an empty accumulator is a no-op.
+    ///
+    /// # Errors
+    /// Incompatible precision or value type. On error `self` is unchanged.
+    pub fn merge(&mut self, other: &Accumulator) -> Result<()> {
+        if !other.started && other.fallback.is_none() {
+            return Ok(());
+        }
+        if self.fallback.is_some() || other.fallback.is_some() {
+            let Some(sketch) = other.to_sketch() else {
+                return Ok(());
+            };
+            return self.add_sketch(&sketch);
+        }
+        if other.dense {
+            let view = other.view(Some(&other.registers), None);
+            return self.with_scratch(|acc| acc.add_view(&view, other.allowed, true));
+        }
+        let sparse = encoding::encode_sparse(&other.flushed_union());
+        if sparse.len() >= other.max_sparse_bytes() {
+            // A single oversized sparse input that was never merged: `serialize` compacts it to
+            // dense, so go through the same path.
+            let Some(sketch) = other.to_sketch() else {
+                return Ok(());
+            };
+            return self.add_sketch(&sketch);
+        }
+        let view = other.view(None, Some(&sparse));
+        self.with_scratch(|acc| acc.add_view(&view, other.allowed, true))
+    }
+
     /// Merges an in-memory sketch, with the same result as `add_bytes(&sketch.serialize())`
     /// would give in the reference fold (`merge`), but without serializing or copying it.
     ///
