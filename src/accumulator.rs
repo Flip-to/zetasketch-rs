@@ -114,7 +114,7 @@ impl Accumulator {
     /// Malformed bytes, incompatible precision or value type. The sketch is fully validated
     /// before anything is merged, so on error the accumulator is unchanged.
     pub fn add_bytes(&mut self, bytes: &[u8]) -> Result<()> {
-        if self.dense && self.fallback.is_none() && !bytes.is_empty() {
+        if self.started && self.fallback.is_none() && !bytes.is_empty() {
             let view = StateView::parse(bytes)?;
             let allowed = hll::validate_header(&view)?;
             if self.add_small_sparse(&view, allowed, false)? {
@@ -151,7 +151,7 @@ impl Accumulator {
     /// # Errors
     /// Malformed structure, incompatible precision or value type.
     pub fn add_trusted_bytes(&mut self, bytes: &[u8]) -> Result<()> {
-        if self.dense && self.fallback.is_none() && !bytes.is_empty() {
+        if self.started && self.fallback.is_none() && !bytes.is_empty() {
             let view = StateView::parse(bytes)?;
             let allowed = hll::validate_structure(&view)?;
             if self.add_small_sparse(&view, allowed, true)? {
@@ -243,10 +243,18 @@ impl Accumulator {
     }
 
     /// The common case in event-grain data, without touching the scratch buffers: a sparse input
-    /// of at most [`encoding::SMALL`] values, same precisions, into a dense accumulator. Decodes
-    /// and validates into a stack array first, so on error the accumulator is unchanged, then does
-    /// exactly what `add_view` does for this case: take the allowed types and the value count, and
-    /// raise one register per value. Returns `false` (nothing changed) for any other input.
+    /// of at most [`encoding::SMALL`] values with the accumulator's precisions. Decodes and
+    /// validates into a stack array first, so on error the accumulator is unchanged, then does
+    /// exactly what `add_view` does for this case:
+    ///
+    /// - into a dense accumulator: take the allowed types and the value count, and raise one
+    ///   register per value;
+    /// - into a sparse one: the deferral branch of `merge_sparse`, which appends the values to the
+    ///   pending buffer while the 5-bytes-per-value bound stays under the threshold and the buffer
+    ///   under its cap.
+    ///
+    /// Returns `false`, with nothing changed, for any other input and for the sparse case that has
+    /// to flush or normalize (the general path does that).
     fn add_small_sparse(
         &mut self,
         view: &StateView<'_>,
@@ -275,11 +283,22 @@ impl Accumulator {
         let Some(n) = decoded else {
             return Ok(false);
         };
+        if self.dense {
+            self.allowed = types;
+            self.num_values = self.num_values.wrapping_add(view.num_values);
+            for &v in &values[..n] {
+                set_register(&mut self.registers, enc, v);
+            }
+            return Ok(true);
+        }
+        // Sparse accumulator: only the deferral branch (see `merge_sparse` for why it is exact).
+        let deferred = self.pending.len() + n;
+        if self.sparse_bytes + 5 * deferred >= self.max_sparse_bytes() || deferred > MAX_PENDING {
+            return Ok(false);
+        }
         self.allowed = types;
         self.num_values = self.num_values.wrapping_add(view.num_values);
-        for &v in &values[..n] {
-            set_register(&mut self.registers, enc, v);
-        }
+        self.pending.extend_from_slice(&values[..n]);
         Ok(true)
     }
 
@@ -869,5 +888,64 @@ mod tests {
             Err(Error::CorruptSparseData(_))
         ));
         assert_eq!(acc.serialize().unwrap(), before);
+    }
+
+    /// A xorshift generator, so the tests below need no dependency.
+    fn rng(seed: u64) -> impl FnMut() -> u64 {
+        let mut state = seed;
+        move || {
+            state ^= state << 13;
+            state ^= state >> 7;
+            state ^= state << 17;
+            state
+        }
+    }
+
+    fn sketch_of(next: &mut impl FnMut() -> u64, values: u64) -> Vec<u8> {
+        let mut s = HyperLogLogPlusPlus::for_longs(15).unwrap();
+        let start = (next() % 1_000_000_000) as i64;
+        for v in start..start + values as i64 {
+            s.add_long(v).unwrap();
+        }
+        s.serialize()
+    }
+
+    /// Small sparse inputs into a sparse accumulator take the deferral path without the scratch
+    /// buffers. The state must equal the reference fold at every checkpoint, through the flushes
+    /// and the switch to dense.
+    #[test]
+    fn small_sparse_inputs_into_sparse_match_reference() {
+        for trusted in [false, true] {
+            let mut next = rng(0x9e37_79b9_7f4a_7c15);
+            let mut acc = Accumulator::new();
+            let mut reference: Option<HyperLogLogPlusPlus> = None;
+            let mut saw_sparse_after_first = false;
+            for i in 0..4000 {
+                let values = 1 + next() % 20; // 17 to 20 values leave the small path
+                let bytes = sketch_of(&mut next, values);
+                if trusted {
+                    acc.add_trusted_bytes(&bytes).unwrap();
+                } else {
+                    acc.add_bytes(&bytes).unwrap();
+                }
+                match &mut reference {
+                    Some(r) => r.merge_bytes(&bytes).unwrap(),
+                    None => reference = Some(HyperLogLogPlusPlus::from_bytes(&bytes).unwrap()),
+                }
+                saw_sparse_after_first |= i > 0 && !acc.dense;
+                if i % 97 == 0 || i == 3999 {
+                    let mut want = reference.clone().unwrap();
+                    assert_eq!(
+                        acc.estimate(),
+                        want.estimate(),
+                        "input {i} trusted {trusted}"
+                    );
+                    assert_eq!(acc.num_values(), want.num_values(), "input {i}");
+                    assert_eq!(acc.serialize().unwrap(), want.serialize(), "input {i}");
+                }
+            }
+            assert!(saw_sparse_after_first, "the sparse phase was exercised");
+            assert!(acc.dense, "4,000 inputs end dense");
+        }
     }
 }
