@@ -18,6 +18,13 @@ All notable changes to this crate. The format follows
 
 ### Performance
 
+- `Accumulator::merge` of a sparse accumulator into a started one with the same precisions no longer
+  encodes the source's sorted values to varint bytes and decodes them again: the values go in as
+  they are (and straight into the registers when the target is dense). The result is the same as
+  `add_bytes(&other.serialize())`, which a differential test checks across sparse and dense,
+  deferred and merged, empty sources and targets, other precisions and a value-type error. On `examples/merge_probe.rs` (synthetic, 8 partials merged into one accumulator): 8.0 to
+  6.1 us, 38.9 to 28.2 us, 134.5 to 94.0 us per merge for sparse partials of 0.7, 2.4 and 7.4 KB,
+  and 206.5 to 137.6 us for partials around the sparse threshold.
 - `Accumulator::add_trusted_bytes` and `add_bytes` of a small sparse sketch (one to eight values,
   at most 32 bytes) no longer parse it when this thread has folded a sketch of the same length with
   the same bytes before its sparse stream (the same type, versions, precisions and lengths): the
@@ -26,14 +33,23 @@ All notable changes to this crate. The format follows
   also range-checks the values as its validating decode does, and only uses headers learned with
   its own validation. Anything else takes the usual path, which also reports every error. A
   differential test (cache warm against cache emptied, both entry points, flipped, truncated and
-  extended bytes, several precisions and value types, sketches of another kind) and a test of
-  stream shapes (non-minimal and four-byte varints, two and three values, sums over `i32::MAX`,
-  five-byte varints, values outside the sparse range) check that nothing changes. On
+  extended bytes, several precisions and value types, sketches of another kind), a test of stream
+  shapes (non-minimal and four-byte varints, two and three values, sums over `i32::MAX`, five-byte
+  varints) and a test that a stream the validating decode rejects is still refused after a valid one
+  of the same length was learned, check that nothing changes. On
   `examples/single_value_fold.rs` (synthetic sketches, best of four runs, ns per sketch,
   `add_trusted_bytes` unless noted): single value into a dense accumulator 33.6 to 21.4 (`add_bytes`
   37.5 to 25.7), one to three values 41.9 to 29.0 (`add_bytes` 45.5 to 34.1), single value into
   accumulators that stay sparse after 300, 2,000 and 8,000 inputs 31.9 to 18.3, 32.0 to 18.2 and
   48.2 to 32.7 (`add_bytes` 38.6 to 22.6, 38.5 to 22.2, 55.5 to 37.6).
+
+### Fixed
+
+- `Accumulator::merge` of a source that is one oversized sparse input never merged (only the
+  decoded-sparse entry points can build one: a serialized sketch that large is dense) merged the
+  uncompacted state, which gave another estimate than `add_bytes(&other.serialize())` (840 against
+  833 on a test of 1,000 distinct values at precision 10); it now adds the serialized bytes, as
+  `merge` documents.
 
 ## [0.2.4] - 2026-10-29
 

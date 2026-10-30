@@ -404,14 +404,52 @@ impl Accumulator {
             let view = other.view(Some(&other.registers), None);
             return self.with_scratch(|acc| acc.add_view(&view, other.allowed, true));
         }
+        // Sparse into a started accumulator of the same precisions: the sorted values go in as
+        // they are, as `add_view` would have them after decoding the encoded stream. (An `other`
+        // that is one oversized input never merged is not sparse by `serialize`'s rule, so it
+        // takes the path below; with deferred values its union is under the threshold.)
+        if self.started
+            && self.fallback.is_none()
+            && self.precision == other.precision
+            && self.sparse_precision == other.sparse_precision
+            && !(other.pending.is_empty() && other.sparse_bytes >= other.max_sparse_bytes())
+        {
+            let types = self.allowed & other.allowed;
+            if types == 0 {
+                return Err(Error::IncompatibleType(format!(
+                    "aggregator of types {:#b} is incompatible with {:#b}",
+                    self.allowed, other.allowed
+                )));
+            }
+            let union = other.flushed_union();
+            return self.with_scratch(|acc| {
+                acc.allowed = types;
+                acc.num_values = acc.num_values.wrapping_add(other.num_values);
+                if union.is_empty() {
+                    return Ok(());
+                }
+                if acc.dense {
+                    let enc = acc.encoding();
+                    for &v in union.iter() {
+                        set_register(&mut acc.registers, enc, v);
+                    }
+                } else {
+                    acc.incoming.clear();
+                    acc.incoming.extend_from_slice(&union);
+                    acc.merge_sparse();
+                }
+                Ok(())
+            });
+        }
         let sparse = encoding::encode_sparse(&other.flushed_union());
         if sparse.len() >= other.max_sparse_bytes() {
             // A single oversized sparse input that was never merged: `serialize` compacts it to
-            // dense, so go through the same path.
-            let Some(sketch) = other.to_sketch() else {
+            // dense, and `merge` is `add_bytes(serialize())`, so add those bytes (adding the
+            // uncompacted sketch gives another estimate).
+            let Some(bytes) = other.serialize() else {
                 return Ok(());
             };
-            return self.add_sketch(&sketch);
+            return self.add_trusted_bytes(&bytes);
         }
         let view = other.view(None, Some(&sparse));
         self.with_scratch(|acc| acc.add_view(&view, other.allowed, true))
@@ -1021,8 +1059,9 @@ const HEADER_SLOTS: usize = 16;
 /// What the bytes of a small sparse sketch before its sparse stream say. Such a sketch is its
 /// header (type, counts, versions, precisions, and the lengths of the nested message and of the
 /// sparse stream) followed by the stream: `n` varints, which the stream's length bounds. Two
-/// sketches of the same length with the same bytes before the stream parse to the same fields, and
-/// the stream is valid when it is `n` varints of at most four bytes that sum to at most `i32::MAX`.
+/// sketches of the same length with the same bytes before the stream parse to the same fields. The
+/// stream is accepted by `add_trusted_bytes` when it is `n` varints of at most four bytes that sum
+/// to at most `i32::MAX`; `add_bytes` also checks the values' ranges (`small_values_valid`).
 #[derive(Clone, Copy)]
 struct Header {
     /// Length of the whole sketch; 0 for an empty slot.
@@ -1801,11 +1840,13 @@ mod tests {
         assert!(total_hits > 10_000, "{total_hits} hits");
     }
 
-    /// Streams of every shape the cache decodes, and some it must refuse, folded twice (the second
-    /// hits) into dense and sparse accumulators, through both entry points: a minimal one-value
-    /// stream, a non-minimal varint, a four-byte value, a two- and a three-value stream, a stream
-    /// whose sum is over `i32::MAX`, a five-byte varint, and a stream the validating decode rejects
-    /// (a plain value outside the sparse range). Cached and uncached must agree.
+    /// Streams of every shape the cache decodes, and some it must refuse, folded twice into dense
+    /// and sparse accumulators, through both entry points: a minimal one-value stream, a
+    /// non-minimal varint, a four-byte value, a two- and a three-value stream, a stream whose sum is
+    /// over `i32::MAX`, a five-byte varint, and a stream the validating decode rejects (a plain
+    /// value outside the sparse range). The reference side empties the cache before each fold (both
+    /// folds take the full path); the cached side's second fold hits when the stream is cacheable,
+    /// and the results must agree.
     #[test]
     fn header_cache_stream_shapes() {
         let streams: Vec<Vec<u8>> = vec![
@@ -1825,7 +1866,7 @@ mod tests {
                     r#type: HYPERLOGLOG_PLUS_UNIQUE,
                     num_values: stream.iter().filter(|&&b| b < 0x80).count() as i64,
                     encoding_version: hll::ENCODING_VERSION,
-                    value_type: 1,
+                    value_type: long_type(),
                     sparse_size: 1,
                     precision: p,
                     sparse_precision: sp,
@@ -1858,9 +1899,12 @@ mod tests {
                                 acc.add_trusted_bytes(&bytes)
                             }
                         };
-                        let outcome = |acc: &mut Accumulator| {
+                        let outcome = |acc: &mut Accumulator, cached: bool| {
                             std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                                 let first = fold(acc).map_err(|e| e.to_string());
+                                if !cached {
+                                    clear_headers();
+                                }
                                 let second = fold(acc).map_err(|e| e.to_string());
                                 (first, second, acc.num_values(), acc.serialize())
                             }))
@@ -1869,14 +1913,240 @@ mod tests {
                         clear_headers();
                         let (mut a, mut b) = (make(), make());
                         clear_headers();
-                        let want = outcome(&mut b);
+                        let want = outcome(&mut b, false);
                         clear_headers();
-                        let got = outcome(&mut a);
+                        let hits_before = HEADER_HITS.with(std::cell::Cell::get);
+                        let got = outcome(&mut a, true);
+                        let hit = HEADER_HITS.with(std::cell::Cell::get) > hits_before;
                         assert_eq!(
                             got, want,
                             "p {p} sp {sp} stream {stream:?} validating {validating} dense {dense}"
                         );
+                        // The streams the cache decodes must really take the hit path (the
+                        // sparse target with the headroom of 5 bytes per value always can).
+                        let decodable = [0usize, 1, 2, 3, 4]
+                            .contains(&streams.iter().position(|s| s == stream).unwrap());
+                        if decodable
+                            && got.as_ref().is_ok_and(|g| g.0.is_ok() && g.1.is_ok())
+                            && !validating
+                        {
+                            assert!(hit, "no hit for {stream:?}, p {p} sp {sp} dense {dense}");
+                        }
                     }
+                }
+            }
+        }
+    }
+
+    /// An accumulator folded from `n` random sketches of 1 to `max_values` INT64 values at
+    /// precisions `p` and `sp`.
+    fn folded(
+        next: &mut impl FnMut() -> u64,
+        p: i32,
+        sp: i32,
+        n: u64,
+        max_values: u64,
+    ) -> Accumulator {
+        let mut acc = Accumulator::new();
+        for _ in 0..n {
+            let mut s = HyperLogLogPlusPlus::new(p, sp, crate::hll::ValueKind::Long).unwrap();
+            let values = 1 + next() % max_values;
+            for _ in 0..values {
+                s.add_long((next() % 5_000_000) as i64).unwrap();
+            }
+            acc.add_trusted_bytes(&s.serialize()).unwrap();
+        }
+        acc
+    }
+
+    /// `a.merge(&b)` is `a.add_bytes(&b.serialize())`: the same result for sparse and dense,
+    /// deferred and merged, oversized and empty targets and sources, equal and different
+    /// precisions, and an incompatible value type (an error on both sides, target unchanged).
+    #[test]
+    fn merge_equals_adding_the_serialized_source() {
+        let mut next = rng(0x7f4a_7c15_9e37_79b9);
+        let precisions = [(10, 14), (10, 25), (12, 13), (15, 16), (15, 25)];
+        for (p, sp) in precisions {
+            for other_p in [(p, sp), (12, 13), (15, 25)] {
+                for trial in 0..60 {
+                    // From empty to well past the sparse threshold, one input to many.
+                    let sizes = [0u64, 1, 3, 12, 80, 600];
+                    let n_a = sizes[(next() % 6) as usize];
+                    let n_b = sizes[(next() % 6) as usize];
+                    let max_a = [1, 4, 40, 3_000][(next() % 4) as usize];
+                    let max_b = [1, 4, 40, 3_000][(next() % 4) as usize];
+                    let a = folded(&mut next, p, sp, n_a, max_a);
+                    let b = folded(&mut next, other_p.0, other_p.1, n_b, max_b);
+                    let (mut by_merge, mut by_bytes) = (a.clone(), a);
+                    let got = by_merge.merge(&b);
+                    let want = match b.serialize() {
+                        Some(bytes) => by_bytes.add_bytes(&bytes),
+                        None => Ok(()),
+                    };
+                    let ctx = format!("p {p} sp {sp} other {other_p:?} trial {trial} ({n_a}x{max_a} + {n_b}x{max_b})");
+                    assert_eq!(got.is_ok(), want.is_ok(), "{ctx}");
+                    assert_eq!(by_merge.num_values(), by_bytes.num_values(), "{ctx}");
+                    assert_eq!(by_merge.serialize(), by_bytes.serialize(), "{ctx}");
+                    assert_eq!(by_merge.estimate(), by_bytes.estimate(), "{ctx}");
+                }
+            }
+        }
+        // A STRING accumulator and an INT64 one: both sides refuse, the target keeps its state.
+        let mut strings = HyperLogLogPlusPlus::for_strings(15).unwrap();
+        strings.add_str("a").unwrap();
+        let mut target = Accumulator::new();
+        target.add_bytes(&strings.serialize()).unwrap();
+        let longs = folded(&mut next, 15, 25, 5, 3);
+        let before = target.serialize();
+        assert!(target.merge(&longs).is_err());
+        assert!(target.add_bytes(&longs.serialize().unwrap()).is_err());
+        assert_eq!(target.serialize(), before);
+    }
+
+    /// A source that is one oversized sparse input never merged (only the decoded entry points can
+    /// build one: a serialized sketch that large is dense) merges like `add_bytes(serialize())`,
+    /// into empty, sparse, deferred and dense targets.
+    #[test]
+    fn merge_of_an_oversized_never_merged_source() {
+        let mut next = rng(0x0123_4567_89ab_cdef);
+        let long_type = {
+            let mut s = HyperLogLogPlusPlus::for_longs(10).unwrap();
+            s.add_long(1).unwrap();
+            StateView::parse(&s.serialize()).unwrap().value_type
+        };
+        for (p, sp) in [(10, 25), (10, 14), (12, 20)] {
+            let header = SparseHeader::new(long_type, p, sp).unwrap();
+            for trial in 0..40 {
+                // Ascending distinct plain values, more than the sparse threshold's worth of bytes.
+                let count = (1usize << p) * 3 / 4 + 20 + (next() % 200) as usize;
+                let mut values: Vec<u32> =
+                    (0..count).map(|_| (next() % (1u64 << sp)) as u32).collect();
+                values.sort_unstable();
+                values.dedup();
+                let mut source = Accumulator::new();
+                source.add_sparse_values(&header, &values).unwrap();
+                assert!(
+                    source.pending.is_empty() && source.sparse_bytes >= source.max_sparse_bytes(),
+                    "oversized and never merged, p {p} sp {sp} trial {trial}"
+                );
+                for target_kind in 0..4 {
+                    let mut target = Accumulator::new();
+                    match target_kind {
+                        0 => {}
+                        1 => target.merge(&folded(&mut next, p, sp, 2, 3)).unwrap(),
+                        2 => target.merge(&folded(&mut next, p, sp, 40, 30)).unwrap(),
+                        _ => target.merge(&folded(&mut next, p, sp, 2_000, 30)).unwrap(),
+                    }
+                    let (mut by_merge, mut by_bytes) = (target.clone(), target);
+                    let got = by_merge.merge(&source);
+                    let want = by_bytes.add_bytes(&source.serialize().unwrap());
+                    let ctx = format!("p {p} sp {sp} trial {trial} target {target_kind}");
+                    assert_eq!(got.is_ok(), want.is_ok(), "{ctx}");
+                    assert_eq!(by_merge.num_values(), by_bytes.num_values(), "{ctx}");
+                    assert_eq!(by_merge.serialize(), by_bytes.serialize(), "{ctx}");
+                    assert_eq!(by_merge.estimate(), by_bytes.estimate(), "{ctx}");
+                }
+            }
+        }
+    }
+
+    /// The `value_type` field INT64 sketches carry.
+    fn long_type() -> i32 {
+        let mut s = HyperLogLogPlusPlus::for_longs(10).unwrap();
+        s.add_long(1).unwrap();
+        StateView::parse(&s.serialize()).unwrap().value_type
+    }
+
+    /// A stream the validating decode rejects (a value outside the sparse range, a rho-encoded value
+    /// whose `rhoW'` is too large) is never learned, but it can arrive with the same length and the
+    /// same bytes before the stream as one that was: `add_bytes` must refuse it all the same, and
+    /// `add_trusted_bytes` (which skips the range checks) must treat it as the full path does.
+    #[test]
+    fn header_cache_refuses_what_validation_refuses() {
+        let long = crate::hll::ValueKind::Long;
+        // (valid stream, invalid stream of the same length), at p = 15, sp = 25.
+        let pairs: [(Vec<u8>, Vec<u8>); 3] = [
+            (vec![0x80, 0x80, 0x80, 0x08], vec![0xff, 0xff, 0xff, 0x7f]),
+            (
+                vec![0x80, 0x80, 0x80, 0x08, 0x05],
+                vec![0x80, 0x80, 0x80, 0x08, 0xff],
+            ),
+            (vec![0x81, 0x01], vec![0xff, 0x7f]),
+        ];
+        for (valid, invalid) in &pairs {
+            for validating in [false, true] {
+                for dense in [false, true] {
+                    let encode = |stream: &Vec<u8>| {
+                        State {
+                            r#type: HYPERLOGLOG_PLUS_UNIQUE,
+                            num_values: stream.iter().filter(|&&b| b < 0x80).count() as i64,
+                            encoding_version: hll::ENCODING_VERSION,
+                            value_type: long_type(),
+                            sparse_size: 1,
+                            precision: 15,
+                            sparse_precision: 25,
+                            data: None,
+                            sparse_data: Some(stream.clone()),
+                        }
+                        .view()
+                        .encode()
+                    };
+                    let (good, bad) = (encode(valid), encode(invalid));
+                    assert_eq!(good.len(), bad.len());
+                    let make = || {
+                        let mut a = Accumulator::new();
+                        let mut s = HyperLogLogPlusPlus::new(15, 25, long).unwrap();
+                        s.add_long(7).unwrap();
+                        a.add_bytes(&s.serialize()).unwrap();
+                        if dense {
+                            for v in 0..40_000 {
+                                let mut s = HyperLogLogPlusPlus::new(15, 25, long).unwrap();
+                                s.add_long(v).unwrap();
+                                a.add_bytes(&s.serialize()).unwrap();
+                            }
+                        }
+                        a
+                    };
+                    let fold = |acc: &mut Accumulator, bytes: &[u8]| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            if validating {
+                                acc.add_bytes(bytes)
+                            } else {
+                                acc.add_trusted_bytes(bytes)
+                            }
+                            .map_err(|e| e.to_string())
+                        }))
+                        .map_err(|_| "panic")
+                    };
+                    // Reference: every fold on an empty cache. Cached: the valid stream first
+                    // (learned, and hit by a second fold), then the invalid one.
+                    let (mut a, mut b) = (make(), make());
+                    let mut want = Vec::new();
+                    for bytes in [&good, &good, &bad] {
+                        clear_headers();
+                        want.push(fold(&mut b, bytes));
+                    }
+                    clear_headers();
+                    let hits_before = HEADER_HITS.with(std::cell::Cell::get);
+                    let mut got = Vec::new();
+                    for bytes in [&good, &good, &bad] {
+                        got.push(fold(&mut a, bytes));
+                    }
+                    let ctx =
+                        format!("{valid:?} / {invalid:?} validating {validating} dense {dense}");
+                    assert!(
+                        HEADER_HITS.with(std::cell::Cell::get) > hits_before,
+                        "the cache was used: {ctx}"
+                    );
+                    assert_eq!(got, want, "{ctx}");
+                    // Reading a state corrupted by a trusted fold can panic; both sides must agree.
+                    let read = |acc: &Accumulator| {
+                        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                            (acc.num_values(), acc.serialize())
+                        }))
+                        .map_err(|_| "panic")
+                    };
+                    assert_eq!(read(&a), read(&b), "{ctx}");
                 }
             }
         }
