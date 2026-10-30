@@ -153,9 +153,13 @@ impl Accumulator {
     /// before anything is merged, so on error the accumulator is unchanged.
     pub fn add_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         if self.started && self.fallback.is_none() && !bytes.is_empty() {
+            if self.add_cached(bytes, true) {
+                return Ok(());
+            }
             let view = StateView::parse(bytes)?;
             let allowed = hll::validate_header(&view)?;
             if self.add_small_sparse(&view, allowed, false)? {
+                learn_header(bytes, &view, allowed, true);
                 return Ok(());
             }
             return self.with_scratch(|acc| acc.add_view(&view, allowed, false));
@@ -190,13 +194,13 @@ impl Accumulator {
     /// Malformed structure, incompatible precision or value type.
     pub fn add_trusted_bytes(&mut self, bytes: &[u8]) -> Result<()> {
         if self.started && self.fallback.is_none() && !bytes.is_empty() {
-            if self.add_cached_single(bytes) {
+            if self.add_cached(bytes, false) {
                 return Ok(());
             }
             let view = StateView::parse(bytes)?;
             let allowed = hll::validate_structure(&view)?;
             if self.add_small_sparse(&view, allowed, true)? {
-                learn_header(bytes, &view, allowed);
+                learn_header(bytes, &view, allowed, false);
                 return Ok(());
             }
             return self.with_scratch(|acc| acc.add_view(&view, allowed, true));
@@ -506,37 +510,55 @@ impl Accumulator {
         Ok(true)
     }
 
-    /// A sketch of one value whose bytes, but for the value, equal those of a sketch this thread
+    /// A small sparse sketch whose bytes before its stream equal those of a sketch this thread
     /// folded the long way before (see [`learn_header`]), added without parsing it: the same as
-    /// `add_small_sparse` on its parse, which is the same for every sketch with these header
-    /// bytes. Returns `false`, with nothing changed, for anything else (the caller then takes the
-    /// general path, which also reports every error).
+    /// `add_small_sparse` on its parse, which is the same for every sketch with these header bytes.
+    /// With `validate` (the caller is `add_bytes`) the header must have been learned with full
+    /// validation and the values are range-checked as the validating decode does. Returns `false`,
+    /// with nothing changed, for anything else (the caller then takes the general path, which also
+    /// reports every error).
     #[inline]
-    fn add_cached_single(&mut self, bytes: &[u8]) -> bool {
-        let Some((value, header)) = cached_header(bytes) else {
+    fn add_cached(&mut self, bytes: &[u8], validate: bool) -> bool {
+        let Some((values, header)) = cached_header(bytes) else {
             return false;
         };
-        if header.precision != self.precision || header.sparse_precision != self.sparse_precision {
+        if header.precision != self.precision
+            || header.sparse_precision != self.sparse_precision
+            || (validate && !header.validated)
+        {
             return false;
         }
         let types = self.allowed & header.allowed;
         if types == 0 {
             return false;
         }
+        let values = &values[..usize::from(header.n)];
+        if validate && !encoding::small_values_valid(self.encoding(), values) {
+            return false;
+        }
         if self.dense {
             self.allowed = types;
             self.num_values = self.num_values.wrapping_add(header.num_values);
             let enc = self.encoding();
-            set_register(&mut self.registers, enc, value);
+            for &v in values {
+                set_register(&mut self.registers, enc, v);
+            }
+            #[cfg(test)]
+            HEADER_HITS.with(|h| h.set(h.get() + 1));
             return true;
         }
-        let deferred = self.pending.len() + 1;
+        let deferred = self.pending.len() + values.len();
         if self.sparse_bytes + 5 * deferred >= self.max_sparse_bytes() || deferred > MAX_PENDING {
             return false;
         }
         self.allowed = types;
         self.num_values = self.num_values.wrapping_add(header.num_values);
-        self.pending.push(value);
+        // A push is cheaper than a copy of a slice of one or two values.
+        for &v in values {
+            self.pending.push(v);
+        }
+        #[cfg(test)]
+        HEADER_HITS.with(|h| h.set(h.get() + 1));
         true
     }
 
@@ -990,16 +1012,28 @@ impl Accumulator {
 /// Longest sketch (in bytes) the header cache handles.
 const HEADER_MAX: usize = 32;
 
-/// What the bytes of a one-value sparse sketch before its value say. A sketch of one value is its
+/// Most values in a sketch the header cache handles.
+const CACHED_VALUES: usize = 8;
+
+/// Slots of the header cache, by sketch length.
+const HEADER_SLOTS: usize = 16;
+
+/// What the bytes of a small sparse sketch before its sparse stream say. Such a sketch is its
 /// header (type, counts, versions, precisions, and the lengths of the nested message and of the
-/// sparse stream, which a value's varint size fixes) followed by one varint, so two such sketches
-/// with the same bytes before the value parse to the same fields.
+/// sparse stream) followed by the stream: `n` varints, which the stream's length bounds. Two
+/// sketches of the same length with the same bytes before the stream parse to the same fields, and
+/// the stream is valid when it is `n` varints of at most four bytes that sum to at most `i32::MAX`.
 #[derive(Clone, Copy)]
 struct Header {
     /// Length of the whole sketch; 0 for an empty slot.
     len: u8,
-    /// Bytes before the value's varint.
+    /// Bytes before the sparse stream.
     prefix_len: u8,
+    /// Values in the stream.
+    n: u8,
+    /// The header passed the full validation of `add_bytes` (value ranges are checked per sketch),
+    /// not only the structural one of `add_trusted_bytes`.
+    validated: bool,
     precision: i32,
     sparse_precision: i32,
     allowed: u8,
@@ -1010,6 +1044,8 @@ struct Header {
 const NO_HEADER: Header = Header {
     len: 0,
     prefix_len: 0,
+    n: 0,
+    validated: false,
     precision: 0,
     sparse_precision: 0,
     allowed: 0,
@@ -1018,59 +1054,93 @@ const NO_HEADER: Header = Header {
 };
 
 thread_local! {
-    /// Headers of one-value sketches this thread folded before, one slot per length modulo 8.
-    static HEADERS: std::cell::RefCell<[Header; 8]> =
-        const { std::cell::RefCell::new([NO_HEADER; 8]) };
+    /// Headers of small sketches this thread folded before, one slot per length modulo 16.
+    static HEADERS: std::cell::RefCell<[Header; HEADER_SLOTS]> =
+        const { std::cell::RefCell::new([NO_HEADER; HEADER_SLOTS]) };
+    /// Hits of the header cache on this thread (tests check that it is used).
+    #[cfg(test)]
+    static HEADER_HITS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 
-/// The value of a one-byte-to-four-byte varint that fills `tail`, or `None` when `tail` is not
-/// exactly one such varint. The decode is the sparse stream's for a first value.
+/// Decodes `tail` as exactly `n` varints of at most four bytes, the sparse stream's deltas, into
+/// their running sums. `false` for anything else, including a sum over `i32::MAX`, so that the
+/// general path decides (and reports the error).
 #[inline]
-fn single_varint(tail: &[u8]) -> Option<u32> {
-    let (&last, rest) = tail.split_last()?;
-    if tail.len() > 4 || last >= 0x80 || rest.iter().any(|&b| b < 0x80) {
-        return None;
+fn decode_tail(tail: &[u8], n: usize, out: &mut [u32; CACHED_VALUES]) -> bool {
+    let (mut pos, mut k, mut last) = (0usize, 0usize, 0u32);
+    while pos < tail.len() {
+        if k == n {
+            return false;
+        }
+        let (mut delta, mut shift) = (0u32, 0);
+        loop {
+            let Some(&b) = tail.get(pos) else {
+                return false;
+            };
+            pos += 1;
+            delta |= u32::from(b & 0x7f) << shift;
+            if b < 0x80 {
+                break;
+            }
+            shift += 7;
+            if shift >= 28 {
+                return false;
+            }
+        }
+        let Some(v) = last.checked_add(delta) else {
+            return false;
+        };
+        if v > i32::MAX as u32 {
+            return false;
+        }
+        out[k] = v;
+        k += 1;
+        last = v;
     }
-    let mut value = u32::from(last) << (7 * rest.len());
-    for (i, &b) in rest.iter().enumerate() {
-        value |= u32::from(b & 0x7f) << (7 * i);
-    }
-    Some(value)
+    k == n
 }
 
-/// The header cached for a sketch of these bytes and its value, when its bytes before the value
-/// match.
+/// The header cached for a sketch of these bytes, its values, and how many, when its bytes before
+/// the stream match and the stream is the cached number of varints.
 #[inline]
-fn cached_header(bytes: &[u8]) -> Option<(u32, Header)> {
+fn cached_header(bytes: &[u8]) -> Option<([u32; CACHED_VALUES], Header)> {
     if bytes.len() > HEADER_MAX {
         return None;
     }
     HEADERS.with(|slots| {
         let slots = slots.borrow();
-        let h = &slots[bytes.len() & 7];
+        let h = &slots[bytes.len() % HEADER_SLOTS];
         if usize::from(h.len) != bytes.len() {
             return None;
         }
         let (head, tail) = bytes.split_at(usize::from(h.prefix_len));
         (head == &h.prefix[..head.len()]).then_some(())?;
-        Some((single_varint(tail)?, *h))
+        let mut values = [0u32; CACHED_VALUES];
+        decode_tail(tail, usize::from(h.n), &mut values).then_some(())?;
+        Some((values, *h))
     })
 }
 
 /// Empties the header cache of this thread (tests fold the reference side without it).
 #[cfg(test)]
 fn clear_headers() {
-    HEADERS.with(|slots| *slots.borrow_mut() = [NO_HEADER; 8]);
+    HEADERS.with(|slots| *slots.borrow_mut() = [NO_HEADER; HEADER_SLOTS]);
 }
 
-/// Remembers the header of a sketch that was just folded the long way, when it is a sketch of one
-/// value in the usual layout (the value is a varint that ends the sketch and is the whole sparse
-/// stream, there is no dense data).
-fn learn_header(bytes: &[u8], view: &StateView<'_>, allowed: u8) {
+/// Remembers the header of a sketch that was just folded the long way, when it is a small sparse
+/// sketch in the usual layout: the sparse stream ends the sketch, holds one to
+/// [`CACHED_VALUES`] values as varints of at most four bytes, and there is no dense data.
+/// `validated` says the fold was `add_bytes`'s (full validation) and not `add_trusted_bytes`'s.
+fn learn_header(bytes: &[u8], view: &StateView<'_>, allowed: u8, validated: bool) {
     let Some(sparse) = view.sparse_data else {
         return;
     };
-    if bytes.len() > HEADER_MAX || view.has_data() || single_varint(sparse).is_none() {
+    if bytes.len() > HEADER_MAX || view.has_data() || sparse.is_empty() {
+        return;
+    }
+    let n = sparse.iter().filter(|&&b| b < 0x80).count();
+    let mut values = [0u32; CACHED_VALUES];
+    if n == 0 || n > CACHED_VALUES || !decode_tail(sparse, n, &mut values) {
         return;
     }
     let start = (sparse.as_ptr() as usize).wrapping_sub(bytes.as_ptr() as usize);
@@ -1080,12 +1150,23 @@ fn learn_header(bytes: &[u8], view: &StateView<'_>, allowed: u8) {
     let mut h = NO_HEADER;
     h.len = bytes.len() as u8;
     h.prefix_len = start as u8;
+    h.n = n as u8;
+    h.validated = validated;
     h.precision = view.precision;
     h.sparse_precision = view.sparse_precision;
     h.allowed = allowed;
     h.num_values = view.num_values;
     h.prefix[..start].copy_from_slice(&bytes[..start]);
-    HEADERS.with(|slots| slots.borrow_mut()[bytes.len() & 7] = h);
+    HEADERS.with(|slots| {
+        let slot = &mut slots.borrow_mut()[bytes.len() % HEADER_SLOTS];
+        // A validated header is not replaced by the same header learned without validation.
+        let same = slot.len == h.len
+            && slot.prefix_len == h.prefix_len
+            && slot.prefix[..start] == h.prefix[..start];
+        if !(same && slot.validated && !h.validated) {
+            *slot = h;
+        }
+    });
 }
 
 /// Largest input inserted value by value into the sparse union instead of a full merge pass.
@@ -1588,13 +1669,15 @@ mod tests {
         assert_eq!(batched.serialize(), by_bytes.serialize(), "batched bytes");
     }
 
-    /// `add_trusted_bytes` with the header cache warm equals it with the cache empty, for every
-    /// input: one-value sketches of several precisions and value types (the cache hits), few-value
-    /// ones, empty ones, sketches whose value is a longer or non-minimal varint, and byte mutations
-    /// (a flipped byte, a truncation, an extra byte) that must fail or succeed the same way and
-    /// leave a failing fold unchanged. Compared on success or failure after every input and on the
-    /// serialized state every so often.
+    /// `add_trusted_bytes` and `add_bytes` with the header cache warm equal the same calls with the
+    /// cache empty, for every input: one- to four-value sketches of several precisions and value
+    /// types (the cache hits), empty ones, sketches of another kind than the accumulator has, and
+    /// byte mutations (a flipped byte, a truncation, an extra byte) that must fail or succeed the
+    /// same way, panic or not, and leave a failing fold unchanged. The reference side empties the
+    /// cache before and after every input, so the cached side only ever hits what it learned itself.
+    /// Compared on success or failure after every input and on the serialized state every so often.
     #[test]
+    #[allow(clippy::too_many_lines)]
     fn header_cache_changes_nothing() {
         let mut next = rng(0x4a7c_1595_e377_9b97);
         let kinds = [
@@ -1603,54 +1686,73 @@ mod tests {
             (12, 13, crate::hll::ValueKind::Long),
             (10, 14, crate::hll::ValueKind::Long),
         ];
-        let mut cache_hits_expected = 0;
+        let sketch = |next: &mut dyn FnMut() -> u64,
+                      (p, sp, kind): (i32, i32, crate::hll::ValueKind)| {
+            let mut s = HyperLogLogPlusPlus::new(p, sp, kind).unwrap();
+            let values = match next() % 12 {
+                0 => 0,
+                1..=4 => 2 + next() % 3,
+                _ => 1,
+            };
+            for _ in 0..values {
+                // Mostly small hashes of small numbers; a few huge values for long varints.
+                let v = if next() % 9 == 0 {
+                    next() as i64
+                } else {
+                    (next() % 1_000_000) as i64
+                };
+                match kind {
+                    crate::hll::ValueKind::Integer => s.add_int(v as i32).unwrap(),
+                    _ => s.add_long(v).unwrap(),
+                }
+            }
+            s.serialize()
+        };
+        let mut total_hits = 0;
         for run in 0..40 {
-            let (p, sp, kind) = kinds[run % kinds.len()];
+            let own = kinds[run % kinds.len()];
+            let validating = run % 2 == 0;
+            let hits_before = HEADER_HITS.with(std::cell::Cell::get);
+            clear_headers();
             let mut cached = Accumulator::new();
             let mut plain = Accumulator::new();
             for step in 0..1_500 {
-                let mut s = HyperLogLogPlusPlus::new(p, sp, kind).unwrap();
-                let values = match next() % 12 {
-                    0 => 0,
-                    1 | 2 => 2 + next() % 3,
-                    _ => 1,
+                // One input in sixty comes from another kind than the accumulator has (which
+                // moves it to the reference fallback; both sides are then compared and restarted).
+                let kind = if next() % 60 == 0 {
+                    kinds[(next() % 4) as usize]
+                } else {
+                    own
                 };
-                for _ in 0..values {
-                    // Mostly small hashes of small numbers; a few huge values for long varints.
-                    let v = if next() % 9 == 0 {
-                        next() as i64
-                    } else {
-                        (next() % 1_000_000) as i64
-                    };
-                    match kind {
-                        crate::hll::ValueKind::Integer => s.add_int(v as i32).unwrap(),
-                        _ => s.add_long(v).unwrap(),
-                    }
-                }
-                let mut bytes = s.serialize();
+                let mut bytes = sketch(&mut next, kind);
                 match next() % 10 {
                     0 if !bytes.is_empty() => {
                         let i = (next() as usize) % bytes.len();
                         bytes[i] ^= 1 << (next() % 8);
                     }
-                    1 if bytes.len() > 1 => bytes
-                        .truncate(bytes.len() - 1 - (next() as usize) % (bytes.len() - 1).min(3)),
+                    1 if bytes.len() > 1 => {
+                        let cut = 1 + (next() as usize) % (bytes.len() - 1).min(3);
+                        bytes.truncate(bytes.len() - cut);
+                    }
                     2 => bytes.push((next() % 256) as u8),
                     _ => {}
-                }
-                if values == 1 && bytes.len() <= HEADER_MAX {
-                    cache_hits_expected += 1;
                 }
                 // Trusted mode may panic on corrupt input (a value out of range for the
                 // precision); the cached side must then panic exactly when the plain one does.
                 let fold = |acc: &mut Accumulator| {
                     std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-                        acc.add_trusted_bytes(&bytes)
+                        if validating {
+                            acc.add_bytes(&bytes)
+                        } else {
+                            acc.add_trusted_bytes(&bytes)
+                        }
                     }))
                 };
                 let got = fold(&mut cached);
+                let kept = HEADERS.with(|slots| *slots.borrow());
                 clear_headers();
                 let want = fold(&mut plain);
+                HEADERS.with(|slots| *slots.borrow_mut() = kept);
                 match (&got, &want) {
                     (Err(_), Err(_)) => {
                         // Both panicked: the folds are in an undefined state, start over.
@@ -1666,7 +1768,12 @@ mod tests {
                     }
                     _ => panic!("only one side panicked, run {run} step {step}: {bytes:?}"),
                 }
-                if got.as_ref().is_ok_and(Result::is_err) || step % 50 == 0 || step == 1_499 {
+                let left_fast_path = cached.fallback.is_some() || plain.fallback.is_some();
+                if got.as_ref().is_ok_and(Result::is_err)
+                    || step % 50 == 0
+                    || step == 1_499
+                    || left_fast_path
+                {
                     // Reading a corrupt state can panic too; both sides must agree on that.
                     let observe = |acc: &Accumulator| {
                         std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -1682,9 +1789,97 @@ mod tests {
                         _ => panic!("only one side panicked reading, run {run} step {step}"),
                     }
                 }
+                if left_fast_path {
+                    cached = Accumulator::new();
+                    plain = Accumulator::new();
+                }
+            }
+            let hits = HEADER_HITS.with(std::cell::Cell::get) - hits_before;
+            assert!(hits > 20, "run {run}: the cache hit only {hits} times");
+            total_hits += hits;
+        }
+        assert!(total_hits > 10_000, "{total_hits} hits");
+    }
+
+    /// Streams of every shape the cache decodes, and some it must refuse, folded twice (the second
+    /// hits) into dense and sparse accumulators, through both entry points: a minimal one-value
+    /// stream, a non-minimal varint, a four-byte value, a two- and a three-value stream, a stream
+    /// whose sum is over `i32::MAX`, a five-byte varint, and a stream the validating decode rejects
+    /// (a plain value outside the sparse range). Cached and uncached must agree.
+    #[test]
+    fn header_cache_stream_shapes() {
+        let streams: Vec<Vec<u8>> = vec![
+            vec![5],
+            vec![0x85, 0x00],
+            vec![0x80, 0x80, 0x80, 0x40],
+            vec![3, 4],
+            vec![3, 0, 1],
+            vec![0xff, 0xff, 0xff, 0x7f, 0xff, 0xff, 0xff, 0x7f],
+            vec![0x80, 0x80, 0x80, 0x80, 0x01],
+            vec![0xff, 0xff, 0xff, 0xff, 0x0f],
+            vec![0xff, 0xff, 0xff, 0x7f],
+        ];
+        for (p, sp) in [(15, 25), (10, 14)] {
+            for stream in &streams {
+                let state = State {
+                    r#type: HYPERLOGLOG_PLUS_UNIQUE,
+                    num_values: stream.iter().filter(|&&b| b < 0x80).count() as i64,
+                    encoding_version: hll::ENCODING_VERSION,
+                    value_type: 1,
+                    sparse_size: 1,
+                    precision: p,
+                    sparse_precision: sp,
+                    data: None,
+                    sparse_data: Some(stream.clone()),
+                };
+                let bytes = state.view().encode();
+                for validating in [false, true] {
+                    for dense in [false, true] {
+                        let make = || {
+                            let long = crate::hll::ValueKind::Long;
+                            let mut a = Accumulator::new();
+                            let mut s = HyperLogLogPlusPlus::new(p, sp, long).unwrap();
+                            s.add_long(7).unwrap();
+                            a.add_bytes(&s.serialize()).unwrap();
+                            if dense {
+                                for v in 0..40_000 {
+                                    let mut s = HyperLogLogPlusPlus::new(p, sp, long).unwrap();
+                                    s.add_long(v).unwrap();
+                                    a.add_bytes(&s.serialize()).unwrap();
+                                }
+                                assert!(a.dense);
+                            }
+                            a
+                        };
+                        let fold = |acc: &mut Accumulator| {
+                            if validating {
+                                acc.add_bytes(&bytes)
+                            } else {
+                                acc.add_trusted_bytes(&bytes)
+                            }
+                        };
+                        let outcome = |acc: &mut Accumulator| {
+                            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                                let first = fold(acc).map_err(|e| e.to_string());
+                                let second = fold(acc).map_err(|e| e.to_string());
+                                (first, second, acc.num_values(), acc.serialize())
+                            }))
+                            .map_err(|_| "panic")
+                        };
+                        clear_headers();
+                        let (mut a, mut b) = (make(), make());
+                        clear_headers();
+                        let want = outcome(&mut b);
+                        clear_headers();
+                        let got = outcome(&mut a);
+                        assert_eq!(
+                            got, want,
+                            "p {p} sp {sp} stream {stream:?} validating {validating} dense {dense}"
+                        );
+                    }
+                }
             }
         }
-        assert!(cache_hits_expected > 5_000);
     }
 
     /// A batch whose counts do not add up to its values is rejected before anything is added.

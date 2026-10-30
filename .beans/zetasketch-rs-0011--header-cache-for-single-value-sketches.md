@@ -23,3 +23,17 @@ structural validation, which depend only on those bytes.
 | Reviewed | Reviewer: Yuri Olive | | pending | |
 | Shipped | CI | | pending: merge, then a release only on the owner's approval | |
 | Verified | CI | | pending | |
+
+## Extended after review
+
+The first version cached one-value sketches for `add_trusted_bytes` only. After an independent review
+(no correctness bug; test gaps) it now also covers sketches of one to eight values (the stream is
+decoded as exactly the remembered number of varints of at most four bytes, sums over `i32::MAX` go to
+the general path) and `add_bytes` (headers learned with full validation, values range-checked by
+`encoding::small_values_valid`, which restates the validating decode's checks). The tests were
+rewritten for the gaps the review found: the cache hits are counted (a thread-local counter) instead of
+inputs that could hit, the reference side runs with the cache emptied before and after so the cached
+side only hits what it learned, both entry points, sketches of another precision or value type, a
+test of stream shapes. Skipping the value check makes the differential test fail. The `validated`
+flag is a precaution: for sketches without dense data `validate_header` equals `validate_structure`, so
+no test can tell, and skipping the flag is not caught.
