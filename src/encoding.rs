@@ -517,6 +517,10 @@ pub(crate) fn encode_sparse(values: &[u32]) -> Vec<u8> {
 pub(crate) fn merge_dedupe_into(enc: Sparse, a: &[u32], b: &[u32], out: &mut Vec<u32>) -> usize {
     out.clear();
     out.reserve(a.len() + b.len());
+    // For ascending inputs the result is that of the general loop alone (a differential fuzz of
+    // 180,000 pairs agreed, and the tests below). For an input that is not ascending (a corrupt
+    // trusted stream that wrapped) the result is unspecified, as it was, and `gap_len` wraps where
+    // the old `varint_len(p - last)` panicked in debug builds.
     // The values below the rho-encoded flag are plain whatever the input (the flag is one bit), and
     // a sorted list has them first. Almost every value is plain (a rho-encoded one needs an index
     // with `sp - p` zero low bits), and they only collapse with an exact duplicate, so they are
@@ -757,6 +761,14 @@ mod tests {
                         .map(|_| match next() % 30 {
                             0 => 0,
                             1 => enc.encode_hash(next()),
+                            // A rho-encoded value for sure: an index with `sp - p` zero low bits.
+                            2 | 3 => {
+                                let zeros = (1u64 << (sp - p)) - 1;
+                                enc.encode_hash(next() & !(zeros << (64 - sp)))
+                            }
+                            // A value at or above the flag whose flag bit is unset (a corrupt but
+                            // decodable stream): the general loop must treat it as plain.
+                            4 => enc.rho_encoded_flag.wrapping_shl(1) | (next() % 1_000) as u32,
                             _ => (next() % pool) as u32,
                         })
                         .collect();

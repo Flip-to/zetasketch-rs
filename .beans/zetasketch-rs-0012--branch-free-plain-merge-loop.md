@@ -22,3 +22,13 @@ drops repeats and counts the encoded length, then runs the old general loop over
 | Reviewed | Reviewer: Yuri Olive | | pending | |
 | Shipped | CI | | pending: merge, then a release only on the owner's approval | |
 | Verified | CI | | pending | |
+
+## Review
+
+An independent review found no difference for ascending inputs (a differential fuzz of 180,000 pairs
+over nine precision pairs, including values at or above the flag with the flag bit unset, against the
+previous function), and two low points, both addressed: the test rarely produced rho-encoded values
+(it now draws them by construction, and values at or above the flag without the flag bit), and for an
+input that is not ascending (only a corrupt trusted stream that wrapped can produce one) the result
+is unspecified, as before, but the old code panicked in debug builds where the new one wraps (noted in
+the code).
