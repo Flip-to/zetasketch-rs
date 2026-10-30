@@ -86,9 +86,11 @@ pub struct Accumulator {
     /// Difference-encoded byte length of `sparse`, kept current across merges.
     sparse_bytes: usize,
     /// Sparse values from same-precision inputs not yet merged into `sparse` (unsorted, may
-    /// contain duplicates). Deferred only while no merge in between could have crossed the
-    /// normalization threshold; see `merge_sparse`.
+    /// contain duplicates). Whether the merges they stand for crossed the normalization threshold
+    /// is decided when they are merged; see `settle`.
     pending: Vec<u32>,
+    /// Length of each sketch's values in `pending`, in order (to replay them one by one).
+    pending_lens: Vec<u32>,
     dense: bool,
     registers: Vec<u8>,
     sparse: Vec<u32>,
@@ -97,6 +99,8 @@ pub struct Accumulator {
     // accumulators (one per group and metric) share one set of warm buffers per thread.
     incoming: Vec<u32>,
     merged: Vec<u32>,
+    /// Scratch for the sorted copy of `pending` while it is merged.
+    sorted: Vec<u32>,
     /// Scratch registers for lowering the dense precision.
     lowered: Vec<u8>,
     fallback: Option<Box<HyperLogLogPlusPlus>>,
@@ -116,6 +120,7 @@ impl Accumulator {
         self.dense = false;
         self.sparse.clear();
         self.pending.clear();
+        self.pending_lens.clear();
         self.fallback = None;
     }
 
@@ -342,11 +347,9 @@ impl Accumulator {
                     }
                     return Ok(());
                 }
-                let deferred = self.pending.len() + n;
-                if self.sparse_bytes + 5 * deferred < self.max_sparse_bytes()
-                    && deferred <= MAX_PENDING
-                {
+                if self.pending.len() + n <= self.pending_cap() {
                     self.pending.extend_from_slice(values);
+                    self.pending_lens.push(n as u32);
                     return Ok(());
                 }
                 self.incoming.clear();
@@ -386,6 +389,8 @@ impl Accumulator {
         if !other.started && other.fallback.is_none() {
             return Ok(());
         }
+        let resolved = other.resolved();
+        let other = &*resolved;
         if self.fallback.is_some() || other.fallback.is_some() {
             let Some(sketch) = other.to_sketch() else {
                 return Ok(());
@@ -396,7 +401,7 @@ impl Accumulator {
             let view = other.view(Some(&other.registers), None);
             return self.with_scratch(|acc| acc.add_view(&view, other.allowed, true));
         }
-        let sparse = encoding::encode_sparse(&other.flushed_union());
+        let sparse = encoding::encode_sparse(&other.sparse);
         if sparse.len() >= other.max_sparse_bytes() {
             // A single oversized sparse input that was never merged: `serialize` compacts it to
             // dense, so go through the same path.
@@ -430,6 +435,7 @@ impl Accumulator {
                 self.fallback = Some(Box::new(sketch.clone()));
                 return Ok(());
             }
+            self.resolve_inner();
             let mut f = HyperLogLogPlusPlus::from_state(self.build_state())?;
             f.merge_ref(sketch)?;
             self.fallback = Some(Box::new(f));
@@ -450,11 +456,10 @@ impl Accumulator {
     /// - into a dense accumulator: take the allowed types and the value count, and raise one
     ///   register per value;
     /// - into a sparse one: the deferral branch of `merge_sparse`, which appends the values to the
-    ///   pending buffer while the 5-bytes-per-value bound stays under the threshold and the buffer
-    ///   under its cap.
+    ///   pending buffer while it stays under its cap.
     ///
     /// Returns `false`, with nothing changed, for any other input and for the sparse case that has
-    /// to flush or normalize (the general path does that).
+    /// to flush (the general path does that).
     fn add_small_sparse(
         &mut self,
         view: &StateView<'_>,
@@ -491,14 +496,14 @@ impl Accumulator {
             }
             return Ok(true);
         }
-        // Sparse accumulator: only the deferral branch (see `merge_sparse` for why it is exact).
-        let deferred = self.pending.len() + n;
-        if self.sparse_bytes + 5 * deferred >= self.max_sparse_bytes() || deferred > MAX_PENDING {
+        // Sparse accumulator: only the deferral branch (see `merge_sparse`).
+        if self.pending.len() + n > self.pending_cap() {
             return Ok(false);
         }
         self.allowed = types;
         self.num_values = self.num_values.wrapping_add(view.num_values);
         self.pending.extend_from_slice(&values[..n]);
+        self.pending_lens.push(n as u32);
         Ok(true)
     }
 
@@ -527,6 +532,7 @@ impl Accumulator {
         if !fast || (!self.dense && !same_precision) {
             // The reference's sparse merge across precisions buffers values one by one; run it
             // there, then resume on the fast path once its buffer is flushed.
+            self.resolve_inner();
             let mut f = HyperLogLogPlusPlus::from_state(self.build_state())?;
             f.merge(HyperLogLogPlusPlus::from_state(view.to_state())?)?;
             self.fallback = Some(Box::new(f));
@@ -566,8 +572,7 @@ impl Accumulator {
         if let Some(f) = &mut self.fallback {
             return f.estimate();
         }
-        // Deferred merges are internal (not Java's add-buffer), so there is nothing to flush:
-        // the estimate only needs the union's size, which `cardinality` computes directly.
+        self.resolve();
         self.cardinality()
     }
 
@@ -581,6 +586,9 @@ impl Accumulator {
         if !self.started {
             return 0;
         }
+        if !self.pending.is_empty() {
+            return self.resolved().cardinality();
+        }
         if self.dense {
             hll::dense_estimate(&self.registers, self.precision)
         } else {
@@ -588,70 +596,122 @@ impl Accumulator {
         }
     }
 
-    /// `sparse_size` as the reference would hold it: the merged union's length once any deferred
-    /// merge exists.
+    /// `sparse_size` as the reference would hold it: the merged union's length once any merge
+    /// happened. Needs no deferred values (`resolved`).
     fn current_sparse_size(&self) -> i32 {
+        debug_assert!(self.pending.is_empty());
+        self.sparse_size
+    }
+
+    /// Most values deferred at once: the union's size over two (so a merge pass is amortized over
+    /// at least half as many values as it reads), and never fewer than [`MAX_PENDING`].
+    fn pending_cap(&self) -> usize {
+        MAX_PENDING.max(self.sparse.len() / 2)
+    }
+
+    /// This accumulator with its deferred values merged: borrowed when there are none, else a
+    /// resolved copy (what a method that takes `&self` reads).
+    fn resolved(&self) -> std::borrow::Cow<'_, Accumulator> {
         if self.pending.is_empty() {
-            self.sparse_size
-        } else {
-            self.distinct_indices() as i32
+            return std::borrow::Cow::Borrowed(self);
+        }
+        let mut copy = self.clone();
+        copy.resolve();
+        std::borrow::Cow::Owned(copy)
+    }
+
+    /// Merges the deferred values (see `settle`).
+    fn resolve(&mut self) {
+        if !self.pending.is_empty() {
+            self.with_scratch(Self::resolve_inner);
         }
     }
 
-    /// Length of the flushed union without building it. Dedupe collapses exactly the values
-    /// that share a sparse index: a plain value *is* its index, and a rho-encoded value decodes
-    /// to an index with zero low `sp - p` bits, so the two kinds never collide. Counting distinct
-    /// indices with a per-thread bitset is O(n) with no sort.
-    fn distinct_indices(&self) -> usize {
-        let enc = self.encoding();
-        let words = (1usize << self.sparse_precision).div_ceil(64);
-        INDEX_BITS.with(|cell| {
-            let mut bits = cell.take();
-            if bits.len() < words {
-                bits.resize(words, 0);
-            }
-            let mut count = 0;
-            for &v in self.sparse.iter().chain(&self.pending) {
-                let i = enc.decode_sparse_index(v) as usize;
-                let (w, m) = (i / 64, 1u64 << (i % 64));
-                count += usize::from(bits[w] & m == 0);
-                bits[w] |= m;
-            }
-            // Clear only the touched words, so the next call starts from zero.
-            for &v in self.sparse.iter().chain(&self.pending) {
-                bits[enc.decode_sparse_index(v) as usize / 64] = 0;
-            }
-            cell.set(bits);
-            count
-        })
-    }
-
-    /// The sparse union including deferred values (borrowed when nothing is pending).
-    fn flushed_union(&self) -> std::borrow::Cow<'_, [u32]> {
-        if self.pending.is_empty() {
-            return std::borrow::Cow::Borrowed(&self.sparse);
-        }
-        let mut pending = self.pending.clone();
-        pending.sort_unstable();
-        let mut out = Vec::new();
-        encoding::merge_dedupe_into(self.encoding(), &self.sparse, &pending, &mut out);
-        std::borrow::Cow::Owned(out)
-    }
-
-    /// Merges the deferred values into `sparse`. No threshold check is needed: deferral only
-    /// happens while the threshold provably cannot be reached (see `merge_sparse`).
-    fn flush_pending(&mut self) {
+    /// [`resolve`](Self::resolve) with the scratch buffers already lent.
+    fn resolve_inner(&mut self) {
         if self.pending.is_empty() {
             return;
         }
-        let enc = self.encoding();
-        sort_runs(&mut self.pending);
-        self.sparse_bytes =
-            encoding::merge_dedupe_into(enc, &self.sparse, &self.pending, &mut self.merged);
-        std::mem::swap(&mut self.sparse, &mut self.merged);
+        let pending = std::mem::take(&mut self.pending);
+        let lens = std::mem::take(&mut self.pending_lens);
+        self.settle(&pending, &lens);
+        self.pending = pending;
         self.pending.clear();
+        self.pending_lens = lens;
+        self.pending_lens.clear();
+    }
+
+    /// Merges deferred sketches (`values`, one after the other, `lens` long each) into the union
+    /// with one sorted merge, with the result of merging them one at a time as the reference does.
+    ///
+    /// The reference normalizes (goes dense) at the first merge after which the union's encoded
+    /// length reaches the threshold `T`. Take `B`, the length after all the sketches, and `D`, the
+    /// number of values that collapsed into another (same index). Adding a value to the union never
+    /// shortens its encoding (a varint's length is at most the sum of its two halves'), and
+    /// replacing a rho-encoded value by a larger one in its group shortens it by at most one byte,
+    /// which happens at most `D` times. So after every merge before the last the length was at
+    /// most `B + D`:
+    ///
+    /// - `B >= T`: the last merge normalized, so the result is dense, whatever happened before (a
+    ///   dense accumulator holds the maximum of all values, however it got there);
+    /// - `B + D < T`: no merge reached `T`, the union is the sparse result;
+    /// - otherwise the sketches are replayed one by one, which is the reference exactly.
+    ///
+    /// The union is below `T` before the first of them (every earlier check passed).
+    // DECISION(deferred_sparse_merges)
+    fn settle(&mut self, values: &[u32], lens: &[u32]) {
+        let enc = self.encoding();
+        let threshold = self.max_sparse_bytes();
+        self.sorted.clear();
+        self.sorted.extend_from_slice(values);
+        sort_runs(&mut self.sorted);
+        let bytes = encoding::merge_dedupe_into(enc, &self.sparse, &self.sorted, &mut self.merged);
+        let collapsed = self.sparse.len() + self.sorted.len() - self.merged.len();
+        if bytes >= threshold || bytes + collapsed < threshold {
+            std::mem::swap(&mut self.sparse, &mut self.merged);
+            self.sparse_bytes = bytes;
+            self.sparse_size = self.sparse.len() as i32;
+            if bytes >= threshold {
+                self.densify_now();
+            }
+            return;
+        }
+        #[cfg(test)]
+        REPLAYS.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+        let mut offset = 0;
+        for &len in lens {
+            let sketch = &values[offset..offset + len as usize];
+            offset += len as usize;
+            if self.dense {
+                let enc = self.encoding();
+                for &v in sketch {
+                    set_register(&mut self.registers, enc, v);
+                }
+            } else if !sketch.is_empty() {
+                self.merge_step_exact(sketch);
+            }
+        }
+    }
+
+    /// One reference merge of a sparse input into the union (nothing deferred): the sorted union,
+    /// deduped, then normalized if the encoded stream reaches the threshold.
+    fn merge_step_exact(&mut self, values: &[u32]) {
+        debug_assert!(self.pending.is_empty());
+        let enc = self.encoding();
+        if values.len() <= MAX_INSERT && values.len() * 16 <= self.sparse.len() {
+            // A few values into a big union: insert in place. Each insert shifts the union's tail,
+            // so this only beats one full merge pass for a handful of values, whatever the union's
+            // size (measured: 300 values into a 7k union cost ~50 us/sketch by insertion).
+            encoding::insert_dedupe(enc, &mut self.sparse, values, &mut self.sparse_bytes);
+        } else {
+            self.sparse_bytes =
+                encoding::merge_dedupe_into(enc, &self.sparse, values, &mut self.merged);
+            std::mem::swap(&mut self.sparse, &mut self.merged);
+        }
         self.sparse_size = self.sparse.len() as i32;
-        debug_assert!(self.sparse_bytes < self.max_sparse_bytes());
+        if self.sparse_bytes >= self.max_sparse_bytes() {
+            self.densify_now();
+        }
     }
 
     /// The accumulated sketch, or `None` when nothing was added.
@@ -665,6 +725,9 @@ impl Accumulator {
         }
         if !self.started {
             return None;
+        }
+        if !self.pending.is_empty() {
+            return self.resolved().to_sketch();
         }
         Some(
             HyperLogLogPlusPlus::from_state(self.build_state())
@@ -683,10 +746,13 @@ impl Accumulator {
         if !self.started {
             return None;
         }
+        if !self.pending.is_empty() {
+            return self.resolved().serialize();
+        }
         if self.dense {
             return Some(self.view(Some(&self.registers), None).encode());
         }
-        let sparse = encoding::encode_sparse(&self.flushed_union());
+        let sparse = encoding::encode_sparse(&self.sparse);
         if sparse.len() >= self.max_sparse_bytes() {
             // Only reachable when a single oversized sparse input was never merged. The
             // reference compacts it to dense on serialize, so take that path.
@@ -797,6 +863,7 @@ impl Accumulator {
         self.sparse_precision = state.sparse_precision;
         self.sparse_size = state.sparse_size;
         self.pending.clear();
+        self.pending_lens.clear();
         if let Some((values, bytes)) = sparse {
             self.dense = false;
             self.sparse = values;
@@ -820,10 +887,12 @@ impl Accumulator {
             let mut scratch = cell.take();
             std::mem::swap(&mut self.incoming, &mut scratch.incoming);
             std::mem::swap(&mut self.merged, &mut scratch.merged);
+            std::mem::swap(&mut self.sorted, &mut scratch.sorted);
             std::mem::swap(&mut self.lowered, &mut scratch.lowered);
             let result = f(self);
             std::mem::swap(&mut self.incoming, &mut scratch.incoming);
             std::mem::swap(&mut self.merged, &mut scratch.merged);
+            std::mem::swap(&mut self.sorted, &mut scratch.sorted);
             std::mem::swap(&mut self.lowered, &mut scratch.lowered);
             cell.set(scratch);
             result
@@ -858,6 +927,7 @@ impl Accumulator {
         self.sparse_size = view.sparse_size;
         self.sparse.clear();
         self.pending.clear();
+        self.pending_lens.clear();
         if let Some(data) = view.data.filter(|d| !d.is_empty()) {
             self.dense = true;
             self.registers.clear();
@@ -870,9 +940,17 @@ impl Accumulator {
         }
     }
 
-    /// Java `SparseRepresentation.normalize`.
+    /// Java `SparseRepresentation.normalize`, with deferred values merged first.
     fn densify(&mut self) {
-        self.flush_pending();
+        self.resolve_inner();
+        if !self.dense {
+            self.densify_now();
+        }
+    }
+
+    /// `normalize` of the union as it is.
+    fn densify_now(&mut self) {
+        debug_assert!(self.pending.is_empty());
         let enc = self.encoding();
         self.registers.clear();
         self.registers.resize(1 << self.precision, 0);
@@ -884,57 +962,35 @@ impl Accumulator {
         self.sparse_size = 0;
     }
 
-    /// Java sparse + sparse merge: sorted union, dedupe, then normalize if the encoded stream
-    /// reaches `0.75 * 2^p` bytes.
+    /// Java sparse + sparse merge of the values in `incoming`. They are deferred (appended to
+    /// `pending`) while that stays under the cap, and merged later all at once by `settle`, which
+    /// decides exactly whether any of the merges normalized. A merge pass costs the size of the
+    /// union, so merging per input costs far more than per batch of inputs.
     fn merge_sparse(&mut self) {
-        // Deferral is exact: adding one value grows the encoded union by at most 5 bytes (one
-        // varint; replacing a rho-encoded value by a larger one grows it by at most 1). So while
-        // `sparse_bytes + 5 * (pending + incoming)` stays below the threshold, no intermediate
-        // merge in the reference could have crossed it, and a sparse union with max-rho dedupe
-        // does not depend on merge order. Merge once, later.
-        // DECISION(deferred_sparse_merges)
-        // The cap bounds memory per accumulator (8 KiB of pending values) when a request holds
-        // thousands of live accumulators; flushing earlier is always exact.
-        let deferred = self.pending.len() + self.incoming.len();
-        let bound = self.sparse_bytes + 5 * deferred;
-        if bound < self.max_sparse_bytes() && deferred <= MAX_PENDING {
+        let n = self.incoming.len();
+        if self.pending.len() + n <= self.pending_cap() {
             self.pending.extend_from_slice(&self.incoming);
+            self.pending_lens.push(n as u32);
             return;
         }
-        let enc = self.encoding();
-        if !self.pending.is_empty() {
-            // One batch: the deferred values (each deferred step was proven below the threshold)
-            // plus this input, merged into the union in a single pass. The threshold is then
-            // checked right after this input, as in the reference.
+        self.resolve_inner();
+        if self.dense {
+            let enc = self.encoding();
+            for &v in &self.incoming {
+                set_register(&mut self.registers, enc, v);
+            }
+        } else if n <= self.pending_cap() {
             self.pending.extend_from_slice(&self.incoming);
-            sort_runs(&mut self.pending);
-            self.sparse_bytes =
-                encoding::merge_dedupe_into(enc, &self.sparse, &self.pending, &mut self.merged);
-            std::mem::swap(&mut self.sparse, &mut self.merged);
-            self.pending.clear();
-        } else if self.incoming.len() <= MAX_INSERT && self.incoming.len() * 16 <= self.sparse.len()
-        {
-            // A few values into a big union: insert in place. Each insert shifts the union's tail,
-            // so this only beats one full merge pass for a handful of values, whatever the union's
-            // size (measured: 300 values into a 7k union cost ~50 us/sketch by insertion).
-            encoding::insert_dedupe(
-                enc,
-                &mut self.sparse,
-                &self.incoming,
-                &mut self.sparse_bytes,
-            );
+            self.pending_lens.push(n as u32);
         } else {
-            self.sparse_bytes =
-                encoding::merge_dedupe_into(enc, &self.sparse, &self.incoming, &mut self.merged);
-            std::mem::swap(&mut self.sparse, &mut self.merged);
-        }
-        self.sparse_size = self.sparse.len() as i32;
-        if self.sparse_bytes >= self.max_sparse_bytes() {
-            self.densify();
+            let values = std::mem::take(&mut self.incoming);
+            self.merge_step_exact(&values);
+            self.incoming = values;
         }
     }
 
     fn build_state(&self) -> State {
+        debug_assert!(self.pending.is_empty());
         State {
             r#type: HYPERLOGLOG_PLUS_UNIQUE,
             num_values: self.num_values,
@@ -944,7 +1000,7 @@ impl Accumulator {
             precision: self.precision,
             sparse_precision: self.sparse_precision,
             data: self.dense.then(|| self.registers.clone()),
-            sparse_data: (!self.dense).then(|| encoding::encode_sparse(&self.flushed_union())),
+            sparse_data: (!self.dense).then(|| encoding::encode_sparse(&self.sparse)),
         }
     }
 }
@@ -952,7 +1008,11 @@ impl Accumulator {
 /// Largest input inserted value by value into the sparse union instead of a full merge pass.
 const MAX_INSERT: usize = 16;
 
-/// Most deferred sparse values one accumulator holds before merging them (see `merge_sparse`).
+/// Times `settle` replayed sketches one by one (tests check that path ran).
+#[cfg(test)]
+static REPLAYS: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
+/// Fewest deferred sparse values an accumulator holds before merging them (see `pending_cap`).
 const MAX_PENDING: usize = 2048;
 
 /// Per-thread scratch buffers lent to accumulators (see `Accumulator::with_scratch`).
@@ -960,21 +1020,20 @@ const MAX_PENDING: usize = 2048;
 struct Scratch {
     incoming: Vec<u32>,
     merged: Vec<u32>,
+    sorted: Vec<u32>,
     lowered: Vec<u8>,
 }
 
 thread_local! {
     static SCRATCH: std::cell::Cell<Scratch> = std::cell::Cell::new(Scratch::default());
-    /// One bit per sparse index, all zero between calls (see `distinct_indices`).
-    static INDEX_BITS: std::cell::Cell<Vec<u64>> = const { std::cell::Cell::new(Vec::new()) };
 }
 
-/// Sorts `pending`, which is a concatenation of already sorted runs (each decoded input stream
-/// is ascending). The stable sort detects and merges runs, so this costs about a k-way merge
-/// rather than a full comparison sort.
-#[allow(clippy::stable_sort_primitive)]
+/// Sorts `pending`, a concatenation of short ascending runs (each decoded input stream is
+/// ascending). Equal values are identical, so an unstable sort gives the same result as a stable
+/// one; it measured about twice as fast here as the run-detecting stable sort, whose runs are a
+/// couple of values long.
 fn sort_runs(values: &mut [u32]) {
-    values.sort();
+    values.sort_unstable();
 }
 
 #[inline]
@@ -1447,6 +1506,121 @@ mod tests {
         assert_eq!(batched.estimate(), by_bytes.estimate(), "batched estimate");
         assert_eq!(batched.num_values(), by_bytes.num_values(), "batched count");
         assert_eq!(batched.serialize(), by_bytes.serialize(), "batched bytes");
+    }
+
+    /// A sketch of `values` pseudo-random INT64 values at precisions `p` and `sp`.
+    fn sketch_at(next: &mut impl FnMut() -> u64, p: i32, sp: i32, values: u64) -> Vec<u8> {
+        let mut s = HyperLogLogPlusPlus::new(p, sp, crate::hll::ValueKind::Long).unwrap();
+        for _ in 0..values {
+            s.add_long(next() as i64).unwrap();
+        }
+        s.serialize()
+    }
+
+    /// Merging is deferred and decided later (`settle`): with the reference compared only every
+    /// so many inputs, so that long stretches of inputs are deferred and then settled at once, the
+    /// state must equal the reference fold exactly, at small precisions where the normalization
+    /// threshold is crossed after a few hundred values, for both ways of adding, and through
+    /// every read: `estimate`, `cardinality`, `serialize`, `to_sketch` and `merge` into another
+    /// accumulator (the `&self` ones read a resolved copy and must not change the accumulator).
+    #[test]
+    fn deferred_merges_match_reference_at_checkpoints() {
+        let mut next = rng(0x2545_f491_4f6c_dd1d);
+        // (p, sp): sp close to p makes many values share an index (collapse, rho replacement).
+        for (p, sp) in [
+            (10, 11),
+            (10, 14),
+            (10, 25),
+            (12, 13),
+            (12, 20),
+            (15, 16),
+            (15, 25),
+        ] {
+            for trusted in [false, true] {
+                for trial in 0..24 {
+                    let inputs: Vec<Vec<u8>> = (0..(40 + next() % 900))
+                        .map(|_| {
+                            let values = 1 + next() % 24;
+                            sketch_at(&mut next, p, sp, values)
+                        })
+                        .collect();
+                    let every = 1 + (next() % 150) as usize;
+                    let mut acc = Accumulator::new();
+                    let mut reference: Option<HyperLogLogPlusPlus> = None;
+                    for (i, bytes) in inputs.iter().enumerate() {
+                        if trusted {
+                            acc.add_trusted_bytes(bytes).unwrap();
+                        } else {
+                            acc.add_bytes(bytes).unwrap();
+                        }
+                        match &mut reference {
+                            Some(r) => r.merge_bytes(bytes).unwrap(),
+                            None => {
+                                reference = Some(HyperLogLogPlusPlus::from_bytes(bytes).unwrap());
+                            }
+                        }
+                        if (i + 1) % every != 0 && i + 1 != inputs.len() {
+                            continue;
+                        }
+                        let mut want = reference.clone().unwrap();
+                        let ctx =
+                            format!("p {p} sp {sp} trusted {trusted} trial {trial} input {i}");
+                        let before = acc.pending.len();
+                        // `&self` reads leave the deferred values alone.
+                        assert_eq!(acc.cardinality(), want.cardinality(), "cardinality, {ctx}");
+                        assert_eq!(acc.pending.len(), before, "{ctx}");
+                        assert_eq!(acc.serialize().unwrap(), want.clone().serialize(), "{ctx}");
+                        assert_eq!(
+                            acc.to_sketch().unwrap().serialize(),
+                            want.clone().serialize()
+                        );
+                        assert_eq!(acc.pending.len(), before, "{ctx}");
+                        let mut into = Accumulator::new();
+                        into.merge(&acc).unwrap();
+                        assert_eq!(into.serialize().unwrap(), want.clone().serialize(), "{ctx}");
+                        if (i + 1) % 2 == 0 {
+                            assert_eq!(acc.estimate(), want.estimate(), "estimate, {ctx}");
+                            assert!(acc.pending.is_empty(), "{ctx}");
+                        }
+                        assert_eq!(acc.num_values(), want.num_values(), "count, {ctx}");
+                    }
+                }
+            }
+        }
+        assert!(
+            REPLAYS.load(std::sync::atomic::Ordering::Relaxed) > 0,
+            "the replay path ran (a merge reached the threshold before the last, yet the last did not)"
+        );
+    }
+
+    /// An input that cannot be added (another value type) while values are deferred changes
+    /// nothing, and the deferred values still settle to the reference result.
+    #[test]
+    fn rejected_input_with_deferred_values_changes_nothing() {
+        let mut next = rng(0x9e37_79b9_7f4a_7c15);
+        let strings = {
+            let mut s = HyperLogLogPlusPlus::for_strings(10).unwrap();
+            s.add_str("x").unwrap();
+            s.serialize()
+        };
+        let mut acc = Accumulator::new();
+        let mut reference: Option<HyperLogLogPlusPlus> = None;
+        for i in 0..300 {
+            let values = 1 + next() % 6;
+            let bytes = sketch_at(&mut next, 10, 25, values);
+            acc.add_bytes(&bytes).unwrap();
+            match &mut reference {
+                Some(r) => r.merge_bytes(&bytes).unwrap(),
+                None => reference = Some(HyperLogLogPlusPlus::from_bytes(&bytes).unwrap()),
+            }
+            if i % 7 == 3 && !acc.dense {
+                assert!(acc.add_bytes(&strings).is_err());
+                assert!(reference.clone().unwrap().merge_bytes(&strings).is_err());
+            }
+        }
+        let mut want = reference.unwrap();
+        assert_eq!(acc.estimate(), want.estimate());
+        assert_eq!(acc.serialize().unwrap(), want.serialize());
     }
 
     /// A batch whose counts do not add up to its values is rejected before anything is added.

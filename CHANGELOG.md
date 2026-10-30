@@ -16,6 +16,14 @@ All notable changes to this crate. The format follows
   phases, a value-type error and a precision change; `num_values` and `sparse_size` of a sketch are
   taken to be its number of values.
 
+### Changed
+
+- Sparse merges are deferred up to a cap that follows the union's size (at least 2,048 values),
+  and `Accumulator` decides exactly, when it merges them, whether any of the merges reached the
+  normalization threshold, replaying the sketches one by one in the rare case the bounds cannot
+  tell. The results are unchanged (the tests compare with the reference fold at checkpoints, through
+  every read path). Methods that take `&self` read a resolved copy while values are deferred.
+
 ## [0.2.4] - 2026-10-29
 
 ### Performance
