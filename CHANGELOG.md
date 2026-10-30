@@ -6,6 +6,16 @@ All notable changes to this crate. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- Folding sketches that were decoded beforehand, for engines that keep sparse sketches next to their
+  data in a form that needs no protobuf parsing: `SparseHeader` (value type and precisions,
+  validated once), `Accumulator::add_single_values`, `add_sparse_values` and `add_sparse_batch`
+  (counts plus flattened values; a tight loop once the accumulator is dense). Each is the same as
+  `add_trusted_bytes` on the serialized sketches, which the tests check across the sparse and dense
+  phases, a value-type error and a precision change; `num_values` and `sparse_size` of a sketch are
+  taken to be its number of values.
+
 ## [0.2.4] - 2026-10-29
 
 ### Performance

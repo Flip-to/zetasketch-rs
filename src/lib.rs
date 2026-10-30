@@ -28,7 +28,7 @@ mod java_internal_tests;
 pub mod kll;
 mod proto;
 
-pub use accumulator::Accumulator;
+pub use accumulator::{Accumulator, SparseHeader};
 pub use error::{Error, Result};
 pub use hll::{
     HyperLogLogPlusPlus, ValueKind, DEFAULT_NORMAL_PRECISION, DEFAULT_SPARSE_PRECISION_DELTA,
