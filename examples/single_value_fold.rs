@@ -71,6 +71,37 @@ fn time(name: &str, warm: &[Vec<u8>], inputs: &Packed, trusted: bool) {
     println!("{name:<42} {best:6.1} ns per sketch");
 }
 
+/// ns per sketch for fresh accumulators that each take `n` singles (the sparse phase, up to the
+/// dense threshold).
+fn sparse_phase(name: &str, singles: &[Vec<u8>], n: usize) {
+    let reps = (200_000 / n).max(5);
+    let mut best = f64::MAX;
+    for _ in 0..5 {
+        let mut acc = Accumulator::new();
+        let t = Instant::now();
+        for _ in 0..reps {
+            acc.reset();
+            for b in &singles[..n] {
+                acc.add_bytes(b).unwrap();
+            }
+        }
+        best = best.min(t.elapsed().as_nanos() as f64 / (reps * n) as f64);
+        std::hint::black_box(acc.cardinality());
+    }
+    // A dense sketch serializes to its registers (32 KiB); a sparse one stays below the 24,576-byte
+    // normalization threshold, so the length tells which phase the last accumulator ended in.
+    let mut acc = Accumulator::new();
+    for b in &singles[..n] {
+        acc.add_bytes(b).unwrap();
+    }
+    let ends = if acc.serialize().is_some_and(|b| b.len() > 30_000) {
+        "dense"
+    } else {
+        "sparse"
+    };
+    println!("{name:<42} {best:6.1} ns per sketch (ends {ends})");
+}
+
 fn main() {
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;
     let warm = sketches(20_000, 1, &mut seed); // enough singles to turn the accumulator dense
@@ -86,20 +117,12 @@ fn main() {
     time("single value, dense, trusted", &warm, &singles, true);
     time("1-3 values, dense accumulator", &warm, &few, false);
     time("1-3 values, dense, trusted", &warm, &few, true);
-    // Sparse phase: a fresh accumulator takes 300 singles (stays below the dense threshold).
-    let sparse_in = &singles_vec[..300];
-    let mut best = f64::MAX;
-    for _ in 0..2000 {
-        let mut acc = Accumulator::new();
-        let t = Instant::now();
-        for b in sparse_in {
-            acc.add_bytes(b).unwrap();
-        }
-        best = best.min(t.elapsed().as_nanos() as f64 / sparse_in.len() as f64);
-        std::hint::black_box(acc.cardinality());
+    // Sparse phase: fresh accumulators that take 300, 2,000 and 8,000 singles.
+    for n in [300, 2_000, 8_000] {
+        sparse_phase(
+            &format!("single value, sparse accumulator ({n})"),
+            &singles_vec,
+            n,
+        );
     }
-    println!(
-        "{:<42} {best:6.1} ns per sketch",
-        "single value, sparse accumulator (300)"
-    );
 }

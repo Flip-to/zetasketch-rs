@@ -6,6 +6,15 @@ All notable changes to this crate. The format follows
 
 ## [Unreleased]
 
+### Performance
+
+- Small sparse sketches (a few values) folded into an accumulator that is still sparse no longer
+  lend the per-thread scratch buffers: they are appended to the deferred buffer, the same branch the
+  general path takes while the deferral bound allows it, and anything else still takes the general
+  path. On `examples/single_value_fold.rs` (synthetic single-value sketches into fresh
+  accumulators): about 56 to 39 ns per `add_bytes` for 300 and 2,000 inputs, and 71 to 53 ns for
+  8,000. Dense accumulators are unchanged.
+
 ## [0.2.3] - 2026-10-29
 
 ### Performance
