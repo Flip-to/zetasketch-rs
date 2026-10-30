@@ -6,6 +6,8 @@ All notable changes to this crate. The format follows
 
 ## [Unreleased]
 
+## [0.2.4] - 2026-10-29
+
 ### Performance
 
 - Small sparse sketches (a few values) folded into an accumulator that is still sparse no longer
