@@ -22,10 +22,17 @@ All notable changes to this crate. The format follows
   encodes the source's sorted values to varint bytes and decodes them again: the values go in as
   they are (and straight into the registers when the target is dense). The result is the same as
   `add_bytes(&other.serialize())`, which a differential test checks across sparse and dense,
-  deferred and merged, oversized and empty sources and targets, other precisions and a value-type
-  error. On `examples/merge_probe.rs` (synthetic, 8 partials merged into one accumulator): 8.0 to
+  deferred and merged, empty sources and targets, other precisions and a value-type error. On `examples/merge_probe.rs` (synthetic, 8 partials merged into one accumulator): 8.0 to
   6.1 us, 38.9 to 28.2 us, 134.5 to 94.0 us per merge for sparse partials of 0.7, 2.4 and 7.4 KB,
   and 206.5 to 137.6 us for partials around the sparse threshold.
+
+### Fixed
+
+- `Accumulator::merge` of a source that is one oversized sparse input never merged (only the
+  decoded-sparse entry points can build one: a serialized sketch that large is dense) merged the
+  uncompacted state, which gave another estimate than `add_bytes(&other.serialize())` (840 against
+  833 on a test of 1,000 distinct values at precision 10); it now adds the serialized bytes, as
+  `merge` documents.
 
 ## [0.2.4] - 2026-10-29
 

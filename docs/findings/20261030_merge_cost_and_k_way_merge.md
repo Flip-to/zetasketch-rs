@@ -1,7 +1,9 @@
 # Merging sparse partials: where the time goes, and a rejected one-pass `merge_many`
 
-Dated 2026-10-30. Windows, rustc 1.91.0, release, one machine; synthetic sketches only
-(`examples/merge_probe.rs`). Ratios matter, not absolute numbers.
+Dated 2026-10-30. One Windows machine, release builds; synthetic sketches only
+(`examples/merge_probe.rs`). Ratios matter, not absolute numbers. The "before" numbers are `main`
+at `f7a9b59` (run `merge_probe` there to reproduce them); the one-pass `merge_many` prototype was
+not committed (it merged the sorted unions pairwise, as described below).
 
 ## Question
 
@@ -47,7 +49,7 @@ sequential 2.3, 12.8 and 48.5 us per partial against 2.3, 11.7 and 48.4 us for t
 
 ## Conclusion
 
-The one-pass merge did not beat merging one at a time at any size tried (-8 % to +19 %), with or
+The one-pass merge did not beat merging one at a time at any size tried (-9 % to +19 %), with or
 without deferred values, so it was not shipped: it would add a public method and an exactness
 argument for no measured gain. Sorting the deferred values of each source (done once per source
 either way) and the per-value work of the union pass are a large part of a merge, not the number of

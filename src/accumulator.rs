@@ -436,11 +436,12 @@ impl Accumulator {
         let sparse = encoding::encode_sparse(&other.flushed_union());
         if sparse.len() >= other.max_sparse_bytes() {
             // A single oversized sparse input that was never merged: `serialize` compacts it to
-            // dense, so go through the same path.
-            let Some(sketch) = other.to_sketch() else {
+            // dense, and `merge` is `add_bytes(serialize())`, so add those bytes (adding the
+            // uncompacted sketch gives another estimate).
+            let Some(bytes) = other.serialize() else {
                 return Ok(());
             };
-            return self.add_sketch(&sketch);
+            return self.add_trusted_bytes(&bytes);
         }
         let view = other.view(None, Some(&sparse));
         self.with_scratch(|acc| acc.add_view(&view, other.allowed, true))
@@ -1549,6 +1550,53 @@ mod tests {
         assert!(target.merge(&longs).is_err());
         assert!(target.add_bytes(&longs.serialize().unwrap()).is_err());
         assert_eq!(target.serialize(), before);
+    }
+
+    /// A source that is one oversized sparse input never merged (only the decoded entry points can
+    /// build one: a serialized sketch that large is dense) merges like `add_bytes(serialize())`,
+    /// into empty, sparse, deferred and dense targets.
+    #[test]
+    fn merge_of_an_oversized_never_merged_source() {
+        let mut next = rng(0x0123_4567_89ab_cdef);
+        let long_type = {
+            let mut s = HyperLogLogPlusPlus::for_longs(10).unwrap();
+            s.add_long(1).unwrap();
+            StateView::parse(&s.serialize()).unwrap().value_type
+        };
+        for (p, sp) in [(10, 25), (10, 14), (12, 20)] {
+            let header = SparseHeader::new(long_type, p, sp).unwrap();
+            for trial in 0..40 {
+                // Ascending distinct plain values, more than the sparse threshold's worth of bytes.
+                let count = (1usize << p) * 3 / 4 + 20 + (next() % 200) as usize;
+                let mut values: Vec<u32> =
+                    (0..count).map(|_| (next() % (1u64 << sp)) as u32).collect();
+                values.sort_unstable();
+                values.dedup();
+                let mut source = Accumulator::new();
+                source.add_sparse_values(&header, &values).unwrap();
+                assert!(
+                    source.pending.is_empty() && source.sparse_bytes >= source.max_sparse_bytes(),
+                    "oversized and never merged, p {p} sp {sp} trial {trial}"
+                );
+                for target_kind in 0..4 {
+                    let mut target = Accumulator::new();
+                    match target_kind {
+                        0 => {}
+                        1 => target.merge(&folded(&mut next, p, sp, 2, 3)).unwrap(),
+                        2 => target.merge(&folded(&mut next, p, sp, 40, 30)).unwrap(),
+                        _ => target.merge(&folded(&mut next, p, sp, 2_000, 30)).unwrap(),
+                    }
+                    let (mut by_merge, mut by_bytes) = (target.clone(), target);
+                    let got = by_merge.merge(&source);
+                    let want = by_bytes.add_bytes(&source.serialize().unwrap());
+                    let ctx = format!("p {p} sp {sp} trial {trial} target {target_kind}");
+                    assert_eq!(got.is_ok(), want.is_ok(), "{ctx}");
+                    assert_eq!(by_merge.num_values(), by_bytes.num_values(), "{ctx}");
+                    assert_eq!(by_merge.serialize(), by_bytes.serialize(), "{ctx}");
+                    assert_eq!(by_merge.estimate(), by_bytes.estimate(), "{ctx}");
+                }
+            }
+        }
     }
 
     /// A batch whose counts do not add up to its values is rejected before anything is added.

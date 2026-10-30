@@ -21,3 +21,13 @@ now go straight in (into the deferral or merge path, or into the registers of a 
 | Reviewed | Reviewer: Yuri Olive | | pending | |
 | Shipped | CI | | pending: merge, then a release only on the owner's approval | |
 | Verified | CI | | pending | |
+
+## Found on review
+
+A review (and a new test, `merge_of_an_oversized_never_merged_source`) found a bug that was already
+on `main`: merging a source that is one oversized sparse input never merged (only the decoded-sparse
+entry points can build one) took the old route through `to_sketch` and `add_sketch`, which merges the
+uncompacted state; `serialize` compacts it to dense, and the two gave different estimates. `merge`
+now adds the serialized bytes in that case, as its documentation says. The test does not exercise the
+guard that keeps that source off the new branch (merging it as plain values gives the same result),
+which stays as a precaution.
