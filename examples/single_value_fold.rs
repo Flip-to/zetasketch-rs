@@ -73,7 +73,7 @@ fn time(name: &str, warm: &[Vec<u8>], inputs: &Packed, trusted: bool) {
 
 /// ns per sketch for fresh accumulators that each take `n` singles (the sparse phase, up to the
 /// dense threshold).
-fn sparse_phase(name: &str, singles: &[Vec<u8>], n: usize) {
+fn sparse_phase(name: &str, singles: &[Vec<u8>], n: usize, trusted: bool) {
     let reps = (200_000 / n).max(5);
     let mut best = f64::MAX;
     for _ in 0..5 {
@@ -82,7 +82,11 @@ fn sparse_phase(name: &str, singles: &[Vec<u8>], n: usize) {
         for _ in 0..reps {
             acc.reset();
             for b in &singles[..n] {
-                acc.add_bytes(b).unwrap();
+                if trusted {
+                    acc.add_trusted_bytes(b).unwrap();
+                } else {
+                    acc.add_bytes(b).unwrap();
+                }
             }
         }
         best = best.min(t.elapsed().as_nanos() as f64 / (reps * n) as f64);
@@ -119,10 +123,13 @@ fn main() {
     time("1-3 values, dense, trusted", &warm, &few, true);
     // Sparse phase: fresh accumulators that take 300, 2,000 and 8,000 singles.
     for n in [300, 2_000, 8_000] {
-        sparse_phase(
-            &format!("single value, sparse accumulator ({n})"),
-            &singles_vec,
-            n,
-        );
+        for (trusted, label) in [(false, ""), (true, ", trusted")] {
+            sparse_phase(
+                &format!("single value, sparse accumulator ({n}){label}"),
+                &singles_vec,
+                n,
+                trusted,
+            );
+        }
     }
 }

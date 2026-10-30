@@ -16,6 +16,18 @@ All notable changes to this crate. The format follows
   phases, a value-type error and a precision change; `num_values` and `sparse_size` of a sketch are
   taken to be its number of values.
 
+### Performance
+
+- `Accumulator::add_trusted_bytes` of a sketch of one value no longer parses it when this thread
+  has folded a sketch with the same bytes before the value (the same type, versions, precisions and
+  lengths): the header is compared with the remembered one, the value read from the last bytes, and
+  the sketch added as the small-sparse path would. Anything else takes the usual path, which also
+  reports every error. A differential test (cache warm against cache emptied, with flipped,
+  truncated and extended bytes, several precisions and value types) checks that nothing changes.
+  On `examples/single_value_fold.rs` (synthetic single-value sketches, `add_trusted_bytes`): 33.6 to
+  19.1 ns per sketch into a dense accumulator, and 31.9 to 18.1, 32.0 to 16.9 and 48.2 to 32.0 ns
+  into accumulators that stay sparse after 300, 2,000 and 8,000 inputs.
+
 ## [0.2.4] - 2026-10-29
 
 ### Performance
