@@ -51,12 +51,32 @@ sequential 2.3, 12.8 and 48.5 us per partial against 2.3, 11.7 and 48.4 us for t
 
 The one-pass merge did not beat merging one at a time at any size tried (-9 % to +19 %), with or
 without deferred values, so it was not shipped: it would add a public method and an exactness
-argument for no measured gain. Sorting the deferred values of each source (done once per source
-either way) and the per-value work of the union pass are a large part of a merge, not the number of
-passes over the growing union. The per-value cost grows with partial size (7.8 to 16.2 ns), which
-this experiment does not explain; a profile of a merge at 3,000 values is the next step if merges
-matter again.
+argument for no measured gain.
 
-Not tried: a loser-tree k-way merge instead of pairwise passes (the pairwise version touches each
-value about log2(k) times; a loser tree about once), and keeping the sources' deferred values
-unsorted and sorting all of them together.
+## Where the time goes (instrumented, then fixed)
+
+Timers around the steps of `merge` (temporary, not committed), 8 partials of one sketch each merged
+into a fresh accumulator, ns per merge:
+
+| Values per partial | Total | Merge-and-dedupe pass | Elements read per merge | ns per element | Sorting deferred values |
+|---|---|---|---|---|---|
+| 300 | 2,909 | 849 | 297 | 2.9 | 1,533 |
+| 1,000 | 14,401 | 7,599 | 1,307 | 5.8 | 2,853 |
+| 3,000 | 48,720 | 46,236 | 9,879 | 4.7 | none |
+
+Nothing else shows up (cloning and merging the source's deferred values is 24 ns, densifying never
+runs). The pass reads the whole growing union for every source, so per incoming value it reads
+(union + incoming) / incoming elements: about 1.5 at 300 values and 3.3 at 3,000, at 3 to 6 ns an
+element. That explains the rise from 7.8 to 16.2 ns per value, and why a pairwise one-pass merge did
+not help: three pairwise passes read about as many elements as eight sequential merges. The lever is
+the cost per element of the pass itself (4.7 ns is slow for a merge), or a loser-tree merge that
+reads every value once.
+
+The pass now merges the plain values (almost all of them: a rho-encoded value needs an index with
+`sp - p` zero low bits) with a branch-free loop that drops repeats and counts the encoded length,
+and keeps the old general loop for the values at or above the rho flag. Per merge of 8 synthetic
+partials: 31.7 to 22.0 us (2.4 KB) and 104.5 to 59.4 us (7.4 KB); 5.5 us (0.7 KB) and the dense case
+unchanged.
+
+Not tried: a loser-tree k-way merge (reads each value once, about 1 element per incoming value
+against 3.3), and keeping the sources' deferred values unsorted and sorting all of them together.
