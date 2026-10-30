@@ -37,3 +37,15 @@ side only hits what it learned, both entry points, sketches of another precision
 test of stream shapes. Skipping the value check makes the differential test fail. The `validated`
 flag is a precaution: for sketches without dense data `validate_header` equals `validate_structure`, so
 no test can tell, and skipping the flag is not caught.
+
+## Second review
+
+A second review of the extension found no correctness bug and two weaknesses in the tests, both fixed:
+`header_cache_stream_shapes` built its streams with a value type the accumulator rejects (every fold
+failed the same way on both sides, so it proved little) and could not tell a hit from the full path
+(the reference side's second fold also hit). It now uses the INT64 value type, the reference side
+empties the cache between its folds, and a new test (`header_cache_refuses_what_validation_refuses`)
+learns a valid stream and then folds an invalid one of the same length: an invalid stream is never
+learned, so only that sequence reaches the value check. Mutations: always-true `small_values_valid`
+fails the differential and the refusal tests; dropping the last value of a multi-value hit fails the
+differential test; ignoring the `validated` flag fails nothing (see above).
