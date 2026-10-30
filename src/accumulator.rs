@@ -19,6 +19,44 @@ use crate::error::{Error, Result};
 use crate::hll::{self, HyperLogLogPlusPlus};
 use crate::proto::{State, StateView, HYPERLOGLOG_PLUS_UNIQUE};
 
+/// What the sketches of one pre-decoded input have in common: the value type and the two
+/// precisions, validated once (see [`Accumulator::add_single_values`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct SparseHeader {
+    value_type: i32,
+    precision: i32,
+    sparse_precision: i32,
+    allowed: u8,
+}
+
+impl SparseHeader {
+    /// Validates the value type and precisions the way a sketch carrying sparse data is validated.
+    ///
+    /// # Errors
+    /// An unknown value type, or precisions the format does not allow (normal precision 4 to 24,
+    /// sparse precision up to 25 and not below the normal one).
+    pub fn new(value_type: i32, precision: i32, sparse_precision: i32) -> Result<Self> {
+        let probe = StateView {
+            r#type: HYPERLOGLOG_PLUS_UNIQUE,
+            num_values: 1,
+            encoding_version: hll::ENCODING_VERSION,
+            value_type,
+            sparse_size: 1,
+            precision,
+            sparse_precision,
+            data: None,
+            sparse_data: Some(&[1]),
+        };
+        let allowed = hll::validate_structure(&probe)?;
+        Ok(SparseHeader {
+            value_type,
+            precision,
+            sparse_precision,
+            allowed,
+        })
+    }
+}
+
 /// Reusable accumulator for merging many serialized sketches.
 ///
 /// ```
@@ -170,6 +208,168 @@ impl Accumulator {
             let allowed = hll::validate_structure(&view)?;
             acc.add_view(&view, allowed, true)
         })
+    }
+
+    /// Adds sparse values that were decoded and validated beforehand, each as a sketch of its own
+    /// that holds that one value: the same result as `add_trusted_bytes` on the serialized
+    /// one-value sparse sketch (`num_values` 1, `sparse_size` 1) of each value, in order, without
+    /// building or parsing those bytes. A value is a sparse-encoded value as stored in the sketch's
+    /// sparse stream. Meant for engines that keep sketches pre-decoded next to their data.
+    ///
+    /// A value outside the range the sparse precision allows is not checked here: the caller
+    /// validated it when it decoded the sketch (like [`add_trusted_bytes`](Self::add_trusted_bytes),
+    /// bad input may give a wrong result or a panic, never undefined behavior).
+    ///
+    /// # Errors
+    /// Incompatible value type or precision with what is already accumulated, as for
+    /// [`add_bytes`](Self::add_bytes). Values before the failing one stay added.
+    pub fn add_single_values(&mut self, header: &SparseHeader, values: &[u32]) -> Result<()> {
+        self.with_scratch(|acc| {
+            for v in values {
+                acc.add_one_sketch(header, std::slice::from_ref(v))?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Adds one sketch whose sparse stream was decoded and validated beforehand: the same result as
+    /// `add_trusted_bytes` on that sketch serialized with `sparse_size` and `num_values` equal to
+    /// `values.len()`. `values` are the stream's sparse-encoded values, ascending, as a valid
+    /// stream holds them, and not empty (an empty slice adds nothing). The same trust applies as
+    /// for [`add_single_values`](Self::add_single_values).
+    ///
+    /// # Errors
+    /// As [`add_single_values`](Self::add_single_values).
+    pub fn add_sparse_values(&mut self, header: &SparseHeader, values: &[u32]) -> Result<()> {
+        self.with_scratch(|acc| acc.add_one_sketch(header, values))
+    }
+
+    /// Adds a run of pre-decoded sparse sketches: sketch `i` has `counts[i]` values, taken in order
+    /// from the flattened `values`. The same result as [`add_sparse_values`](Self::add_sparse_values)
+    /// on each sketch in turn, with the scratch buffers lent once, and a tight loop over the
+    /// remaining values once the accumulator is dense. `values.len()` must equal the sum of
+    /// `counts`.
+    ///
+    /// # Errors
+    /// As [`add_single_values`](Self::add_single_values), and an error, with nothing added, when
+    /// `values.len()` is not the sum of `counts`.
+    pub fn add_sparse_batch(
+        &mut self,
+        header: &SparseHeader,
+        counts: &[u8],
+        values: &[u32],
+    ) -> Result<()> {
+        let total: usize = counts.iter().map(|&c| usize::from(c)).sum();
+        if total != values.len() {
+            return Err(Error::InvalidState(format!(
+                "counts add up to {total} values but {} were given",
+                values.len()
+            )));
+        }
+        self.with_scratch(|acc| {
+            let mut offset = 0usize;
+            for &count in counts {
+                if acc.dense
+                    && acc.fallback.is_none()
+                    && acc.precision == header.precision
+                    && acc.sparse_precision == header.sparse_precision
+                    && acc.allowed & header.allowed != 0
+                {
+                    // Dense and compatible: every remaining sketch only raises registers, and each
+                    // adds as many values to the count as it holds. (Sketches of no values add
+                    // nothing, and are in `counts` only.)
+                    let rest = &values[offset..];
+                    acc.allowed &= header.allowed;
+                    acc.num_values = acc.num_values.wrapping_add(rest.len() as i64);
+                    let enc = acc.encoding();
+                    for &v in rest {
+                        set_register(&mut acc.registers, enc, v);
+                    }
+                    return Ok(());
+                }
+                let n = usize::from(count);
+                acc.add_one_sketch(header, &values[offset..offset + n])?;
+                offset += n;
+            }
+            Ok(())
+        })
+    }
+
+    /// One pre-decoded sparse sketch, scratch buffers already lent.
+    fn add_one_sketch(&mut self, h: &SparseHeader, values: &[u32]) -> Result<()> {
+        if values.is_empty() {
+            return Ok(());
+        }
+        let n = values.len();
+        if !self.started && self.fallback.is_none() {
+            let view = StateView {
+                r#type: HYPERLOGLOG_PLUS_UNIQUE,
+                num_values: n as i64,
+                encoding_version: hll::ENCODING_VERSION,
+                value_type: h.value_type,
+                sparse_size: n as i32,
+                precision: h.precision,
+                sparse_precision: h.sparse_precision,
+                data: None,
+                sparse_data: None,
+            };
+            self.incoming.clear();
+            self.incoming.extend_from_slice(values);
+            self.start(&view, h.allowed);
+            let mut last = 0u32;
+            self.sparse_bytes = values
+                .iter()
+                .map(|&v| {
+                    let delta = v - last;
+                    last = v;
+                    crate::proto::varint_len(delta)
+                })
+                .sum();
+            return Ok(());
+        }
+        if self.fallback.is_none()
+            && self.precision == h.precision
+            && self.sparse_precision == h.sparse_precision
+        {
+            let types = self.allowed & h.allowed;
+            if types != 0 {
+                self.allowed = types;
+                self.num_values = self.num_values.wrapping_add(n as i64);
+                if self.dense {
+                    let enc = self.encoding();
+                    for &v in values {
+                        set_register(&mut self.registers, enc, v);
+                    }
+                    return Ok(());
+                }
+                let deferred = self.pending.len() + n;
+                if self.sparse_bytes + 5 * deferred < self.max_sparse_bytes()
+                    && deferred <= MAX_PENDING
+                {
+                    self.pending.extend_from_slice(values);
+                    return Ok(());
+                }
+                self.incoming.clear();
+                self.incoming.extend_from_slice(values);
+                self.merge_sparse();
+                return Ok(());
+            }
+        }
+        // Anything else (a precision change, incompatible types, the reference fallback): the
+        // general path, on the serialized sketch.
+        let state = State {
+            r#type: HYPERLOGLOG_PLUS_UNIQUE,
+            num_values: n as i64,
+            encoding_version: hll::ENCODING_VERSION,
+            value_type: h.value_type,
+            sparse_size: n as i32,
+            precision: h.precision,
+            sparse_precision: h.sparse_precision,
+            data: None,
+            sparse_data: Some(encoding::encode_sparse(values)),
+        };
+        let bytes = state.view().encode();
+        self.add_bytes_inner(&bytes)
     }
 
     /// Merges another accumulator's result into this one: exactly
@@ -1066,5 +1266,198 @@ mod tests {
                 "2,150 singles are still below the dense threshold"
             );
         }
+    }
+
+    /// The header and the one sparse value of a serialized one-value sparse sketch.
+    fn decoded_single(bytes: &[u8]) -> (SparseHeader, u32) {
+        let view = StateView::parse(bytes).unwrap();
+        let values = encoding::decode_sparse(view.sparse_data.unwrap()).unwrap();
+        assert_eq!(values.len(), 1, "a one-value sketch");
+        let header =
+            SparseHeader::new(view.value_type, view.precision, view.sparse_precision).unwrap();
+        (header, values[0])
+    }
+
+    /// `add_single_values` is `add_trusted_bytes` on the serialized one-value sketch of each value:
+    /// same estimate, count and bytes at checkpoints, through the sparse phase, the pending flushes
+    /// and the switch to dense, with a STRING sketch (incompatible) and a precision change (the
+    /// reference fallback) in the stream, one value per call and in batches.
+    #[test]
+    fn add_single_values_equals_the_one_value_sketches() {
+        let mut next = rng(0x0bad_cafe_dead_beef);
+        let strings = {
+            let mut s = HyperLogLogPlusPlus::for_strings(15).unwrap();
+            s.add_str("one string").unwrap();
+            s.serialize()
+        };
+        let other_precision = {
+            let mut s = HyperLogLogPlusPlus::for_longs(14).unwrap();
+            s.add_long(7).unwrap();
+            s.serialize()
+        };
+        let inputs: Vec<Vec<u8>> = (0..40_000)
+            .map(|i| match i {
+                1500 => strings.clone(),
+                3000 | 30_000 => other_precision.clone(),
+                _ => sketch_of(&mut next, 1),
+            })
+            .collect();
+        let decoded: Vec<(SparseHeader, u32)> = inputs.iter().map(|b| decoded_single(b)).collect();
+
+        let mut by_bytes = Accumulator::new();
+        let mut one_at_a_time = Accumulator::new();
+        let (mut saw_sparse, mut saw_dense) = (false, false);
+        for (i, bytes) in inputs.iter().enumerate() {
+            let (h, v) = decoded[i];
+            let want = by_bytes.add_trusted_bytes(bytes);
+            let got = one_at_a_time.add_single_values(&h, &[v]);
+            assert_eq!(got.is_ok(), want.is_ok(), "input {i}");
+            saw_sparse |= i > 0 && !one_at_a_time.dense && one_at_a_time.started;
+            saw_dense |= one_at_a_time.dense;
+            if i % 997 == 0 || i == inputs.len() - 1 {
+                assert_eq!(
+                    one_at_a_time.estimate(),
+                    by_bytes.estimate(),
+                    "estimate, input {i}"
+                );
+                assert_eq!(
+                    one_at_a_time.num_values(),
+                    by_bytes.num_values(),
+                    "count, input {i}"
+                );
+                assert_eq!(
+                    one_at_a_time.serialize(),
+                    by_bytes.serialize(),
+                    "bytes, input {i}"
+                );
+            }
+        }
+
+        assert!(saw_sparse && saw_dense, "both phases were exercised");
+
+        // The same values in batches of equal headers.
+        let mut batched = Accumulator::new();
+        let mut at = 0;
+        while at < decoded.len() {
+            let h = decoded[at].0;
+            let mut end = at + 1;
+            while end < decoded.len()
+                && decoded[end].0 == h
+                && end - at < 1 + (next() % 400) as usize
+            {
+                end += 1;
+            }
+            let values: Vec<u32> = decoded[at..end].iter().map(|d| d.1).collect();
+            let _ = batched.add_single_values(&h, &values);
+            at = end;
+        }
+        assert_eq!(batched.estimate(), by_bytes.estimate(), "batched estimate");
+        assert_eq!(batched.num_values(), by_bytes.num_values(), "batched count");
+        assert_eq!(batched.serialize(), by_bytes.serialize(), "batched bytes");
+    }
+
+    /// `add_sparse_values` is `add_trusted_bytes` on the serialized sketch whose `sparse_size` and
+    /// `num_values` equal the number of values: same estimate, count and bytes at checkpoints,
+    /// through the sparse phase, flushes and the switch to dense, with a STRING sketch and a
+    /// precision change in the stream.
+    #[test]
+    fn add_sparse_values_equals_the_sketches() {
+        let mut next = rng(0x5eed_0000_1234_5678);
+        let strings = {
+            let mut s = HyperLogLogPlusPlus::for_strings(15).unwrap();
+            s.add_str("one string").unwrap();
+            s.serialize()
+        };
+        let other_precision = {
+            let mut s = HyperLogLogPlusPlus::for_longs(14).unwrap();
+            for v in 0..5 {
+                s.add_long(v).unwrap();
+            }
+            s.serialize()
+        };
+        let mut inputs: Vec<(Vec<u8>, SparseHeader, Vec<u32>)> = Vec::new();
+        while inputs.len() < 4000 {
+            let i = inputs.len();
+            let bytes = match i {
+                700 => strings.clone(),
+                1500 | 3000 => other_precision.clone(),
+                _ => {
+                    let n = 1 + next() % 40;
+                    sketch_of(&mut next, n)
+                }
+            };
+            let view = StateView::parse(&bytes).unwrap();
+            let values = encoding::decode_sparse(view.sparse_data.unwrap()).unwrap();
+            // The API sets both counters to the number of values, so keep sketches that agree
+            // (a repeated sparse index would make them differ, which is rare).
+            if view.num_values != values.len() as i64 || view.sparse_size != values.len() as i32 {
+                continue;
+            }
+            let header =
+                SparseHeader::new(view.value_type, view.precision, view.sparse_precision).unwrap();
+            inputs.push((bytes, header, values));
+        }
+        let mut by_bytes = Accumulator::new();
+        let mut by_values = Accumulator::new();
+        let (mut saw_sparse, mut saw_dense) = (false, false);
+        for (i, (bytes, header, values)) in inputs.iter().enumerate() {
+            let want = by_bytes.add_trusted_bytes(bytes);
+            let got = by_values.add_sparse_values(header, values);
+            assert_eq!(got.is_ok(), want.is_ok(), "input {i}");
+            saw_sparse |= i > 0 && !by_values.dense && by_values.started;
+            saw_dense |= by_values.dense;
+            if i % 101 == 0 || i == inputs.len() - 1 {
+                assert_eq!(
+                    by_values.estimate(),
+                    by_bytes.estimate(),
+                    "estimate, input {i}"
+                );
+                assert_eq!(
+                    by_values.num_values(),
+                    by_bytes.num_values(),
+                    "count, input {i}"
+                );
+                assert_eq!(
+                    by_values.serialize(),
+                    by_bytes.serialize(),
+                    "bytes, input {i}"
+                );
+            }
+        }
+        assert!(saw_sparse && saw_dense, "both phases were exercised");
+
+        // The same sketches as batches of equal headers: counts plus flattened values.
+        let mut batched = Accumulator::new();
+        let mut at = 0;
+        while at < inputs.len() {
+            let h = inputs[at].1;
+            let mut end = at + 1;
+            while end < inputs.len() && inputs[end].1 == h && end - at < 1 + (next() % 300) as usize
+            {
+                end += 1;
+            }
+            let counts: Vec<u8> = inputs[at..end].iter().map(|i| i.2.len() as u8).collect();
+            let values: Vec<u32> = inputs[at..end]
+                .iter()
+                .flat_map(|i| i.2.iter().copied())
+                .collect();
+            let _ = batched.add_sparse_batch(&h, &counts, &values);
+            at = end;
+        }
+        assert_eq!(batched.estimate(), by_bytes.estimate(), "batched estimate");
+        assert_eq!(batched.num_values(), by_bytes.num_values(), "batched count");
+        assert_eq!(batched.serialize(), by_bytes.serialize(), "batched bytes");
+    }
+
+    /// A batch whose counts do not add up to its values is rejected before anything is added.
+    #[test]
+    fn add_sparse_batch_rejects_mismatched_lengths() {
+        let header = SparseHeader::new(8, 15, 20).unwrap();
+        let mut acc = Accumulator::new();
+        assert!(acc.add_sparse_batch(&header, &[2, 1], &[1, 2]).is_err());
+        assert!(acc.add_sparse_batch(&header, &[1], &[1, 2]).is_err());
+        assert!(acc.is_empty(), "nothing was added");
+        acc.add_sparse_batch(&header, &[2, 1], &[1, 2, 3]).unwrap();
+        assert!(!acc.is_empty());
     }
 }
