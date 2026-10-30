@@ -25,6 +25,13 @@ All notable changes to this crate. The format follows
   deferred and merged, empty sources and targets, other precisions and a value-type error. On `examples/merge_probe.rs` (synthetic, 8 partials merged into one accumulator): 8.0 to
   6.1 us, 38.9 to 28.2 us, 134.5 to 94.0 us per merge for sparse partials of 0.7, 2.4 and 7.4 KB,
   and 206.5 to 137.6 us for partials around the sparse threshold.
+- The merge-and-dedupe pass over two sorted sparse lists (the core of every sparse merge and flush)
+  merges the plain values, which are almost all of them, with a branch-free loop that also counts
+  the encoded length, and keeps the general loop for rho-encoded values. The output is the same
+  (checked against the three-pass version on random data with repeats inside runs, empty runs and
+  rho-encoded values). On `examples/merge_probe.rs`, per merge of 8 synthetic partials: 31.7 to 22.0
+  us and 104.5 to 59.4 us for sparse partials of 2.4 and 7.4 KB; the 0.7 KB and the dense case are
+  unchanged.
 
 ### Fixed
 

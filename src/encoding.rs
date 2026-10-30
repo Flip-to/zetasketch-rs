@@ -517,10 +517,64 @@ pub(crate) fn encode_sparse(values: &[u32]) -> Vec<u8> {
 pub(crate) fn merge_dedupe_into(enc: Sparse, a: &[u32], b: &[u32], out: &mut Vec<u32>) -> usize {
     out.clear();
     out.reserve(a.len() + b.len());
+    // The values below the rho-encoded flag are plain whatever the input (the flag is one bit), and
+    // a sorted list has them first. Almost every value is plain (a rho-encoded one needs an index
+    // with `sp - p` zero low bits), and they only collapse with an exact duplicate, so they are
+    // merged by a loop without the group logic; the rest takes the general loop, continuing from
+    // the last plain value.
+    let split_a = a.partition_point(|&v| v < enc.rho_encoded_flag);
+    let split_b = b.partition_point(|&v| v < enc.rho_encoded_flag);
+    let (bytes, last) = merge_plain(&a[..split_a], &b[..split_b], out);
+    merge_dedupe_rest(enc, &a[split_a..], &b[split_b..], out, bytes, last)
+}
+
+/// Encoded length of the gap `delta` as a varint: 1 to 5 bytes (`varint_len` without branches).
+#[inline]
+fn gap_len(delta: u32) -> usize {
+    (38 - (delta | 1).leading_zeros() as usize) / 7
+}
+
+/// Merges two ascending runs of plain values into `out`, dropping every repeated value, with the
+/// difference-encoded length of the result and its last value (0 when empty).
+fn merge_plain(a: &[u32], b: &[u32], out: &mut Vec<u32>) -> (usize, u32) {
+    let base = out.len();
+    out.resize(base + a.len() + b.len(), 0);
+    let dst = &mut out[base..];
+    let (mut i, mut j, mut k) = (0, 0, 0);
+    let (mut bytes, mut last) = (0, 0u32);
+    let mut step = |v: u32, k: &mut usize| {
+        let fresh = *k == 0 || v != last;
+        dst[*k] = v;
+        bytes += usize::from(fresh) * gap_len(v.wrapping_sub(last));
+        *k += usize::from(fresh);
+        last = v;
+    };
+    while i < a.len() && j < b.len() {
+        let (x, y) = (a[i], b[j]);
+        step(x.min(y), &mut k);
+        i += usize::from(x <= y);
+        j += usize::from(y <= x);
+    }
+    for &v in a[i..].iter().chain(&b[j..]) {
+        step(v, &mut k);
+    }
+    out.truncate(base + k);
+    (bytes, last)
+}
+
+/// The general merge and dedupe loop (rho-encoded groups keep their last, largest value) over the
+/// rest of two runs, `out` already holding the plain values merged before them with `bytes` and
+/// `last` their encoded length and last value.
+fn merge_dedupe_rest(
+    enc: Sparse,
+    a: &[u32],
+    b: &[u32],
+    out: &mut Vec<u32>,
+    mut bytes: usize,
+    mut last: u32,
+) -> usize {
     let (mut i, mut j) = (0, 0);
     let mut pending: Option<u32> = None;
-    let mut bytes = 0usize;
-    let mut last = 0u32;
     while i < a.len() || j < b.len() {
         let v = if j < b.len() && (i >= a.len() || b[j] < a[i]) {
             j += 1;
@@ -660,6 +714,63 @@ mod tests {
                 let mut union_bytes = encode_sparse(&union).len();
                 insert_dedupe(enc, &mut union, &b, &mut union_bytes);
                 assert_eq!((union, union_bytes), expected, "insert p={p} sp={sp}");
+            }
+        }
+    }
+
+    #[test]
+    fn gap_len_is_varint_len() {
+        for delta in (0..=70_000u32).chain([
+            0x1f_ffff,
+            0x20_0000,
+            0x0fff_ffff,
+            0x1000_0000,
+            u32::MAX - 1,
+            u32::MAX,
+        ]) {
+            assert_eq!(gap_len(delta), crate::proto::varint_len(delta), "{delta}");
+        }
+    }
+
+    /// The plain-value loop against the three-pass version on data that is mostly plain, with
+    /// repeats inside a run as well as across the two, empty runs, runs of one value, a value of 0,
+    /// large gaps, and a few rho-encoded values among them (the general loop continues from the last
+    /// plain one).
+    #[test]
+    fn plain_merge_matches_three_pass_with_duplicates() {
+        let mut seed = 0x2545_f491_4f6c_dd1du64;
+        let mut next = move || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            seed
+        };
+        for (p, sp) in [(15, 25), (15, 20), (10, 25), (12, 13), (15, 16), (4, 25)] {
+            let enc = Sparse::new(p, sp);
+            let plain_max = 1u64 << sp.min(31);
+            for round in 0..400 {
+                let pool = [3u64, 40, 5_000, plain_max][(next() % 4) as usize];
+                let na = [0, 1, 2, 17, 300, 1_500][(next() % 6) as usize];
+                let nb = [0, 1, 2, 17, 300, 1_500][(next() % 6) as usize];
+                let mut make = |n: u64| -> Vec<u32> {
+                    let mut v: Vec<u32> = (0..n)
+                        .map(|_| match next() % 30 {
+                            0 => 0,
+                            1 => enc.encode_hash(next()),
+                            _ => (next() % pool) as u32,
+                        })
+                        .collect();
+                    v.sort_unstable();
+                    v
+                };
+                let (a, b) = (make(na), make(nb));
+                let mut out = Vec::new();
+                let bytes = merge_dedupe_into(enc, &a, &b, &mut out);
+                assert_eq!(
+                    (out, bytes),
+                    three_pass(enc, &a, &b),
+                    "p={p} sp={sp} round {round} ({na}, {nb})"
+                );
             }
         }
     }
