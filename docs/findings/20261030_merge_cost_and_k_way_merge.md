@@ -80,3 +80,21 @@ unchanged.
 
 Not tried: a loser-tree k-way merge (reads each value once, about 1 element per incoming value
 against 3.3), and keeping the sources' deferred values unsorted and sorting all of them together.
+
+## Galloping merge of a short run into a long union: no gain
+
+Tried: for a run `b` of plain values at most one eighth the length of the union `a`, find each
+value's position by binary search, copy the stretches of `a` between them whole, and adjust the
+encoded length by the gaps next to each inserted value, instead of one compare per element of `a`.
+Exact (a differential test against the general merge, bytes included, passed; a wrong gap
+adjustment was caught by it).
+
+Measured with a synthetic probe: an accumulator of about 11,000 stored values (just under the dense
+threshold, so every merge of a partial flushes), 20 partials of `n` values each merged into copies of
+it and the result serialized; best of seven rounds, us per merge, gallop against the general merge:
+5.4 against 5.6 and 4.9 against 5.0 at 1 to 16 values, no difference above. Run-to-run noise was
+about as large (4.5 to 5.4 us for the same code). Most of a merge of a short partial is outside the
+pass (cloning the source's values, the bookkeeping, the serialize), and a pass over 11,000 values is
+only about 20 us once per flush, which deferral already amortizes everywhere but at the dense
+threshold. Not shipped. A union that large only exists just below the threshold, so there is no
+regime where it would matter.
