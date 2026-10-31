@@ -32,6 +32,23 @@ All notable changes to this crate. The format follows
   rho-encoded values). On `examples/merge_probe.rs`, per merge of 8 synthetic partials: 31.7 to 22.0
   us and 104.5 to 59.4 us for sparse partials of 2.4 and 7.4 KB; the 0.7 KB and the dense case are
   unchanged.
+- `Accumulator::add_trusted_bytes` and `add_bytes` of a small sparse sketch (one to eight values,
+  at most 32 bytes) no longer parse it when this thread has folded a sketch of the same length with
+  the same bytes before its sparse stream (the same type, versions, precisions and lengths): the
+  header is compared with the remembered one, the stream decoded as exactly the remembered number
+  of varints of at most four bytes, and the values added as the small-sparse path would. `add_bytes`
+  also range-checks the values as its validating decode does, and only uses headers learned with
+  its own validation. Anything else takes the usual path, which also reports every error. A
+  differential test (cache warm against cache emptied, both entry points, flipped, truncated and
+  extended bytes, several precisions and value types, sketches of another kind), a test of stream
+  shapes (non-minimal and four-byte varints, two and three values, sums over `i32::MAX`, five-byte
+  varints) and a test that a stream the validating decode rejects is still refused after a valid one
+  of the same length was learned, check that nothing changes. On
+  `examples/single_value_fold.rs` (synthetic sketches, best of four runs, ns per sketch,
+  `add_trusted_bytes` unless noted): single value into a dense accumulator 33.6 to 21.4 (`add_bytes`
+  37.5 to 25.7), one to three values 41.9 to 29.0 (`add_bytes` 45.5 to 34.1), single value into
+  accumulators that stay sparse after 300, 2,000 and 8,000 inputs 31.9 to 18.3, 32.0 to 18.2 and
+  48.2 to 32.7 (`add_bytes` 38.6 to 22.6, 38.5 to 22.2, 55.5 to 37.6).
 
 ### Fixed
 

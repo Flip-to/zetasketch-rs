@@ -394,6 +394,26 @@ pub(crate) fn decode_validated_small(
     Ok(complete.then_some(n))
 }
 
+/// The checks `decode_validated_small` makes on the values of a stream, for values that are
+/// already decoded, non-decreasing and at most `i32::MAX` (the wrap-around check is then moot):
+/// a rho-encoded value's `rhoW'` bound per value, and the range of the last plain and the last
+/// value.
+pub(crate) fn small_values_valid(enc: Sparse, values: &[u32]) -> bool {
+    let max_rho = (65 - enc.sparse_precision).clamp(0, 63) as u32;
+    let mut last_plain: Option<u32> = None;
+    for &v in values {
+        if enc.is_rho_encoded(v) {
+            if v & RHOW_MASK > max_rho {
+                return false;
+            }
+        } else {
+            last_plain = Some(v);
+        }
+    }
+    let in_range = |v: u32| i32::try_from(v).is_ok() && enc.is_valid(v);
+    last_plain.into_iter().all(in_range) && values.last().copied().into_iter().all(in_range)
+}
+
 /// [`decode_unvalidated_into`] for streams of at most [`SMALL`] values, into a caller's array.
 /// `Ok(None)` when the stream has more values.
 pub(crate) fn decode_unvalidated_small(
