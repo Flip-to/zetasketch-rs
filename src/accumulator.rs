@@ -394,6 +394,13 @@ impl Accumulator {
     /// Use it to fold chunks of a large input on several threads and then combine the
     /// per-thread accumulators. Merging an empty accumulator is a no-op.
     ///
+    /// One corner differs from `add_bytes`: the accumulator's allowed value types are taken from
+    /// `other` as they stand (the Java `merge` of two sketch objects intersects them), while
+    /// `add_bytes` derives them from the value type written in the serialized sketch. They only
+    /// differ for a source that began as an UNKNOWN-type sketch and was then narrowed by a typed
+    /// sketch, which serializes as UNKNOWN again; sketches written by a typed builder (BigQuery,
+    /// Java) never take that path.
+    ///
     /// # Errors
     /// Incompatible precision or value type. On error `self` is unchanged.
     pub fn merge(&mut self, other: &Accumulator) -> Result<()> {
