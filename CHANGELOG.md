@@ -32,6 +32,14 @@ All notable changes to this crate. The format follows
   rho-encoded values). On `examples/merge_probe.rs`, per merge of 8 synthetic partials: 31.7 to 22.0
   us and 104.5 to 59.4 us for sparse partials of 2.4 and 7.4 KB; the 0.7 KB and the dense case are
   unchanged.
+- Setting a register from a sparse value (folding sparse values into a dense accumulator, merging a
+  sparse source into a dense one, converting a sparse union to registers) stores the maximum
+  unconditionally instead of branching on whether the register grows: while the registers fill the
+  branch is unpredictable. Same registers. On `examples/merge_steps.rs` (synthetic, sparse partials
+  of 13 KB into one accumulator, us per merge): 57 to 38 for a merge into a dense accumulator
+  and 187 to 132 for the merge that crosses the threshold; for partials of 22 KB 88 to 74 and
+  279 to 191. `examples/merge_probe.rs`, partials of 22 KB: 129 to 97.5 us per merge; the other
+  rows and one-by-one folds (`examples/single_value_fold.rs`) are unchanged within noise.
 - `Accumulator::add_trusted_bytes` and `add_bytes` of a small sparse sketch (one to eight values,
   at most 32 bytes) no longer parse it when this thread has folded a sketch of the same length with
   the same bytes before its sparse stream (the same type, versions, precisions and lengths): the
