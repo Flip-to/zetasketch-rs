@@ -410,6 +410,31 @@ impl Accumulator {
             let view = other.view(Some(&other.registers), None);
             return self.with_scratch(|acc| acc.add_view(&view, other.allowed, true));
         }
+        // Sparse into an empty accumulator: it becomes a copy of the source (what `start` makes of
+        // the decoded stream), without encoding the union to varint bytes and decoding it again.
+        // An `other` that is one oversized input never merged is not sparse by `serialize`'s rule
+        // and takes the general path.
+        if !self.started
+            && self.fallback.is_none()
+            && other.sparse_precision != hll::SPARSE_PRECISION_DISABLED
+            && !(other.pending.is_empty() && other.sparse_bytes >= other.max_sparse_bytes())
+        {
+            let (union, union_bytes) = other.flushed_union_bytes();
+            self.started = true;
+            self.allowed = other.allowed;
+            self.value_type = other.value_type;
+            self.num_values = other.num_values;
+            self.precision = other.precision;
+            self.sparse_precision = other.sparse_precision;
+            self.sparse_size = other.current_sparse_size();
+            self.dense = false;
+            self.pending.clear();
+            self.pending_slack = 0;
+            self.sparse.clear();
+            self.sparse.extend_from_slice(&union);
+            self.sparse_bytes = union_bytes;
+            return Ok(());
+        }
         // Sparse into a started accumulator of the same precisions: the sorted values go in as
         // they are, as `add_view` would have them after decoding the encoded stream. (An `other`
         // that is one oversized input never merged is not sparse by `serialize`'s rule, so it
@@ -2073,6 +2098,14 @@ mod tests {
                     let ctx = format!("p {p} sp {sp} trial {trial} step {step}");
                     assert_eq!(by_merge.num_values(), by_bytes.num_values(), "{ctx}");
                     assert_eq!(by_merge.serialize(), by_bytes.serialize(), "{ctx}");
+                    if !by_merge.dense {
+                        // The tracked encoded length is the real one (threshold decisions use it).
+                        assert_eq!(
+                            by_merge.sparse_bytes,
+                            encoding::encode_sparse(&by_merge.sparse).len(),
+                            "{ctx}"
+                        );
+                    }
                 }
                 assert_eq!(
                     by_merge.estimate(),

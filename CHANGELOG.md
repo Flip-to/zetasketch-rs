@@ -50,6 +50,12 @@ All notable changes to this crate. The format follows
   and 187 to 132 for the merge that crosses the threshold; for partials of 22 KB 88 to 74 and
   279 to 191. `examples/merge_probe.rs`, partials of 22 KB: 129 to 97.5 us per merge; the other
   rows and one-by-one folds (`examples/single_value_fold.rs`) are unchanged within noise.
+- `Accumulator::merge` of a sparse source into an empty accumulator copies the source's union as it
+  is instead of encoding it to varint bytes, decoding it and copying it again. Same state as
+  `add_bytes(&other.serialize())` (the differential tests cover empty targets, and the multi-source
+  test checks the tracked encoded length against the real one). On `examples/merge_steps.rs`
+  (synthetic, one merge into an empty accumulator, us): 87 to 40 for a partial of 13 KB, 125 to 81
+  for 22 KB, 64 to 33 for 7 KB.
 - `Accumulator::add_trusted_bytes` and `add_bytes` of a small sparse sketch (one to eight values,
   at most 32 bytes) no longer parse it when this thread has folded a sketch of the same length with
   the same bytes before its sparse stream (the same type, versions, precisions and lengths): the
