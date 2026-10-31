@@ -32,6 +32,16 @@ All notable changes to this crate. The format follows
   rho-encoded values). On `examples/merge_probe.rs`, per merge of 8 synthetic partials: 31.7 to 22.0
   us and 104.5 to 59.4 us for sparse partials of 2.4 and 7.4 KB; the 0.7 KB and the dense case are
   unchanged.
+- `Accumulator::merge` of several sparse sources in a row defers their values together (one sort and
+  one merge pass over the union instead of a pass per source) for longer: the bound that makes
+  deferral exact now uses the encoded length of each merged source (a sorted run lengthens a union
+  by at most its own encoded length) instead of 5 bytes per value, and up to 16,384 values may wait.
+  Deferral stays exact: after every merge the accumulator equals the reference fold of the
+  serialized sources, checked on random sequences of 2 to 13 sources whose sums land around the
+  threshold (a bound that is too small is caught by the test). On `examples/merge_probe.rs`
+  (synthetic, 8 partials merged into one accumulator, us per merge): 5.4 to 3.0 for partials of
+  0.7 KB and 20.1 to 14.0 for 2.4 KB; partials of 7.4 KB, which end up dense, 54.5 to 59.1 (about
+  8% slower); the dense case is unchanged, and so is the one-by-one fold (`examples/single_value_fold.rs`, within 3%).
 - Setting a register from a sparse value (folding sparse values into a dense accumulator, merging a
   sparse source into a dense one, converting a sparse union to registers) stores the maximum
   unconditionally instead of branching on whether the register grows: while the registers fill the

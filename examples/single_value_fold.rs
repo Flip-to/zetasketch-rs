@@ -111,7 +111,12 @@ fn main() {
     let warm = sketches(20_000, 1, &mut seed); // enough singles to turn the accumulator dense
     let singles_vec = sketches(1_000_000, 1, &mut seed);
     let few_vec = sketches(1_000_000, 3, &mut seed);
-    let (singles, few) = (Packed::new(&singles_vec), Packed::new(&few_vec));
+    let many_vec = sketches(1_000_000, 12, &mut seed);
+    let (singles, few, many) = (
+        Packed::new(&singles_vec),
+        Packed::new(&few_vec),
+        Packed::new(&many_vec),
+    );
     println!(
         "single sketch: {} bytes; few: {:.1} bytes on average",
         singles_vec[0].len(),
@@ -121,6 +126,8 @@ fn main() {
     time("single value, dense, trusted", &warm, &singles, true);
     time("1-3 values, dense accumulator", &warm, &few, false);
     time("1-3 values, dense, trusted", &warm, &few, true);
+    time("1-12 values, dense accumulator", &warm, &many, false);
+    time("1-12 values, dense, trusted", &warm, &many, true);
     // Sparse phase: fresh accumulators that take 300, 2,000 and 8,000 singles.
     for n in [300, 2_000, 8_000] {
         for (trusted, label) in [(false, ""), (true, ", trusted")] {
