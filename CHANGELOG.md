@@ -40,8 +40,8 @@ All notable changes to this crate. The format follows
   serialized sources, checked on random sequences of 2 to 13 sources whose sums land around the
   threshold (a bound that is too small is caught by the test). On `examples/merge_probe.rs`
   (synthetic, 8 partials merged into one accumulator, us per merge): 5.4 to 3.0 for partials of
-  0.7 KB and 20.1 to 14.0 for 2.4 KB; partials of 7.4 KB, which end up dense, 54.5 to 58.5 (about
-  7% slower); the dense case is unchanged.
+  0.7 KB and 20.1 to 14.0 for 2.4 KB; partials of 7.4 KB, which end up dense, 54.5 to 59.1 (about
+  8% slower); the dense case is unchanged, and so is the one-by-one fold (`examples/single_value_fold.rs`, within 3%).
 - `Accumulator::add_trusted_bytes` and `add_bytes` of a small sparse sketch (one to eight values,
   at most 32 bytes) no longer parse it when this thread has folded a sketch of the same length with
   the same bytes before its sparse stream (the same type, versions, precisions and lengths): the

@@ -89,10 +89,10 @@ pub struct Accumulator {
     /// contain duplicates). Deferred only while no merge in between could have crossed the
     /// normalization threshold; see `merge_sparse`.
     pending: Vec<u32>,
-    /// Upper bound of how much `pending` can grow the encoded length of `sparse` once merged: 5
-    /// bytes per value added one by one, the encoded length of the union for a merged source.
-    /// Zero when `pending` is empty.
-    pending_bytes: usize,
+    /// How much lower than 5 bytes per value of `pending` the bound of its growth of the encoded
+    /// length of `sparse` is: merged sources are bounded by the encoded length of their union (see
+    /// `merge_sparse`). Zero when `pending` is empty, and for values added one by one.
+    pending_slack: usize,
     dense: bool,
     registers: Vec<u8>,
     sparse: Vec<u32>,
@@ -120,7 +120,7 @@ impl Accumulator {
         self.dense = false;
         self.sparse.clear();
         self.pending.clear();
-        self.pending_bytes = 0;
+        self.pending_slack = 0;
         self.fallback = None;
     }
 
@@ -356,16 +356,15 @@ impl Accumulator {
                     return Ok(());
                 }
                 let deferred = self.pending.len() + n;
-                if self.sparse_bytes + self.pending_bytes + 5 * n < self.max_sparse_bytes()
+                if self.sparse_bytes + 5 * deferred - self.pending_slack < self.max_sparse_bytes()
                     && deferred <= MAX_PENDING
                 {
                     self.pending.extend_from_slice(values);
-                    self.pending_bytes += 5 * n;
                     return Ok(());
                 }
                 self.incoming.clear();
                 self.incoming.extend_from_slice(values);
-                self.merge_sparse(5 * n);
+                self.merge_sparse(5 * n, MAX_PENDING);
                 return Ok(());
             }
         }
@@ -442,7 +441,7 @@ impl Accumulator {
                 } else {
                     acc.incoming.clear();
                     acc.incoming.extend_from_slice(&union);
-                    acc.merge_sparse(union_bytes);
+                    acc.merge_sparse(union_bytes, MAX_PENDING_MERGE);
                 }
                 Ok(())
             });
@@ -545,7 +544,7 @@ impl Accumulator {
         }
         // Sparse accumulator: only the deferral branch (see `merge_sparse` for why it is exact).
         let deferred = self.pending.len() + n;
-        if self.sparse_bytes + self.pending_bytes + 5 * n >= self.max_sparse_bytes()
+        if self.sparse_bytes + 5 * deferred - self.pending_slack >= self.max_sparse_bytes()
             || deferred > MAX_PENDING
         {
             return Ok(false);
@@ -553,7 +552,6 @@ impl Accumulator {
         self.allowed = types;
         self.num_values = self.num_values.wrapping_add(view.num_values);
         self.pending.extend_from_slice(&values[..n]);
-        self.pending_bytes += 5 * n;
         Ok(true)
     }
 
@@ -595,7 +593,7 @@ impl Accumulator {
             return true;
         }
         let deferred = self.pending.len() + values.len();
-        if self.sparse_bytes + self.pending_bytes + 5 * values.len() >= self.max_sparse_bytes()
+        if self.sparse_bytes + 5 * deferred - self.pending_slack >= self.max_sparse_bytes()
             || deferred > MAX_PENDING
         {
             return false;
@@ -606,7 +604,6 @@ impl Accumulator {
         for &v in values {
             self.pending.push(v);
         }
-        self.pending_bytes += 5 * values.len();
         #[cfg(test)]
         HEADER_HITS.with(|h| h.set(h.get() + 1));
         true
@@ -664,7 +661,7 @@ impl Accumulator {
                     set_register(&mut self.registers, enc, v);
                 }
             } else {
-                self.merge_sparse(5 * self.incoming.len());
+                self.merge_sparse(5 * self.incoming.len(), MAX_PENDING);
             }
         }
         Ok(())
@@ -765,7 +762,7 @@ impl Accumulator {
             encoding::merge_dedupe_into(enc, &self.sparse, &self.pending, &mut self.merged);
         std::mem::swap(&mut self.sparse, &mut self.merged);
         self.pending.clear();
-        self.pending_bytes = 0;
+        self.pending_slack = 0;
         self.sparse_size = self.sparse.len() as i32;
         debug_assert!(self.sparse_bytes < self.max_sparse_bytes());
     }
@@ -913,7 +910,7 @@ impl Accumulator {
         self.sparse_precision = state.sparse_precision;
         self.sparse_size = state.sparse_size;
         self.pending.clear();
-        self.pending_bytes = 0;
+        self.pending_slack = 0;
         if let Some((values, bytes)) = sparse {
             self.dense = false;
             self.sparse = values;
@@ -975,7 +972,7 @@ impl Accumulator {
         self.sparse_size = view.sparse_size;
         self.sparse.clear();
         self.pending.clear();
-        self.pending_bytes = 0;
+        self.pending_slack = 0;
         if let Some(data) = view.data.filter(|d| !d.is_empty()) {
             self.dense = true;
             self.registers.clear();
@@ -1004,7 +1001,7 @@ impl Accumulator {
 
     /// Java sparse + sparse merge: sorted union, dedupe, then normalize if the encoded stream
     /// reaches `0.75 * 2^p` bytes.
-    fn merge_sparse(&mut self, growth: usize) {
+    fn merge_sparse(&mut self, growth: usize, cap: usize) {
         // Deferral is exact: adding one value grows the encoded union by at most 5 bytes (one
         // varint; replacing a rho-encoded value by a larger one grows it by at most 1). So while
         // `sparse_bytes + 5 * (pending + incoming)` stays below the threshold, no intermediate
@@ -1018,10 +1015,10 @@ impl Accumulator {
         // two neighbours adds at most the length of its own gap, and a larger rho-encoded value
         // replacing a smaller one at most 1 byte, so a sorted run adds at most its own length).
         let deferred = self.pending.len() + self.incoming.len();
-        let bound = self.sparse_bytes + self.pending_bytes + growth;
-        if bound < self.max_sparse_bytes() && deferred <= MAX_PENDING_MERGE {
+        let bound = self.sparse_bytes + 5 * self.pending.len() - self.pending_slack + growth;
+        if bound < self.max_sparse_bytes() && deferred <= cap {
+            self.pending_slack += 5 * self.incoming.len() - growth.min(5 * self.incoming.len());
             self.pending.extend_from_slice(&self.incoming);
-            self.pending_bytes += growth;
             return;
         }
         let enc = self.encoding();
@@ -1035,7 +1032,7 @@ impl Accumulator {
                 encoding::merge_dedupe_into(enc, &self.sparse, &self.pending, &mut self.merged);
             std::mem::swap(&mut self.sparse, &mut self.merged);
             self.pending.clear();
-            self.pending_bytes = 0;
+            self.pending_slack = 0;
         } else if self.incoming.len() <= MAX_INSERT && self.incoming.len() * 16 <= self.sparse.len()
         {
             // A few values into a big union: insert in place. Each insert shifts the union's tail,
