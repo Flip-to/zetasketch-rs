@@ -23,13 +23,7 @@ attempt, including the ones that fail.
 | Exact lazy deferral with a settle step (B/D slack rule, replay) | No gain on the Parquet path; kept on branch `perf/sparse-phase` (bean 0009) for after an engine layout that stores sketches decoded | branch `perf/sparse-phase` |
 | Galloping merge of a short run into a long union (binary search, block copy, adjust the encoded length by the gaps at the junctions) | Exact (differential test, mutation caught), but no measurable gain: 4.9 against 5.0 us per merge at an 11,000-value union, within run-to-run noise (4.5 to 5.4 us). Most of a merge of a short partial is outside the pass, and the long-union regime only exists just below the dense threshold | `20261030_merge_cost_and_k_way_merge.md` (PR #39) |
 | Radix sort (3 passes of 11 bits) of the deferred values instead of the standard sort | 4.5 ns per value against 5.8 (stable) and 4.9 (unstable) at 2,048 values, and 9.8 against 4.3 and 3.5 at 256; the gain is at most 1.3x at the largest batch and a loss below it. Not worth the code | measurement below |
-
-## Measured, not yet decided
-
-- Deferred values are sorted with the stable `sort`; `sort_unstable` is about 15% faster per value
-  (3.5 against 4.3 ns at 256 values, 4.9 against 5.8 at 2,048, runs of 1, 3 or 20 values alike, so
-  the stable sort gains nothing from the runs). Equal `u32` values cannot be told apart, so the result
-  is identical. A small change, to be measured in the fold before it is shipped.
+| `sort_unstable` instead of the stable `sort` for the deferred values (equal `u32` values are indistinguishable, so the output is identical) | Faster in isolation (about 15% per value) but the sort only runs when deferred values are flushed, rare in a fold. In `examples/single_value_fold.rs` the trusted rows moved 17.1 to 17.3 and 25.8 to 25.0 ns per sketch (noise level), while the validating rows moved 29.4 to 21.2 and 37.5 to 29.2 ns, which a sort swap cannot explain (those runs never reach the sort), so that part is code layout, not the change. Not shipped, no claim made | measurement, three interleaved runs each way |
 
 ## Not tried yet
 
