@@ -89,9 +89,10 @@ pub struct Accumulator {
     /// contain duplicates). Deferred only while no merge in between could have crossed the
     /// normalization threshold; see `merge_sparse`.
     pending: Vec<u32>,
-    /// How much lower than 5 bytes per value of `pending` the bound of its growth of the encoded
-    /// length of `sparse` is: merged sources are bounded by the encoded length of their union (see
-    /// `merge_sparse`). Zero when `pending` is empty, and for values added one by one.
+    /// Sum over the merged batches in `pending` of `5 * len - growth`, where `growth` is the batch's
+    /// bound of the growth of the encoded length of `sparse` (the encoded length of a merged
+    /// source's union, 5 bytes per value otherwise; see `merge_sparse`). So `5 * pending.len() -
+    /// pending_slack` bounds the growth of all of `pending`. Zero when `pending` is empty.
     pending_slack: usize,
     dense: bool,
     registers: Vec<u8>,
@@ -501,7 +502,7 @@ impl Accumulator {
     /// - into a dense accumulator: take the allowed types and the value count, and raise one
     ///   register per value;
     /// - into a sparse one: the deferral branch of `merge_sparse`, which appends the values to the
-    ///   pending buffer while the 5-bytes-per-value bound stays under the threshold and the buffer
+    ///   pending buffer while the bound of the growth (5 bytes per value, less the slack) stays under the threshold and the buffer
     ///   under its cap.
     ///
     /// Returns `false`, with nothing changed, for any other input and for the sparse case that has
@@ -1004,12 +1005,13 @@ impl Accumulator {
     fn merge_sparse(&mut self, growth: usize, cap: usize) {
         // Deferral is exact: adding one value grows the encoded union by at most 5 bytes (one
         // varint; replacing a rho-encoded value by a larger one grows it by at most 1). So while
-        // `sparse_bytes + 5 * (pending + incoming)` stays below the threshold, no intermediate
+        // `sparse_bytes + 5 * pending - slack + growth` stays below the threshold, no intermediate
         // merge in the reference could have crossed it, and a sparse union with max-rho dedupe
         // does not depend on merge order. Merge once, later.
         // DECISION(deferred_sparse_merges)
-        // The cap bounds memory per accumulator (8 KiB of pending values) when a request holds
-        // thousands of live accumulators; flushing earlier is always exact.
+        // The cap bounds memory per accumulator (8 KiB of pending values for values added one by
+        // one, 64 KiB for merged sources) when a request holds thousands of live accumulators;
+        // flushing earlier is always exact.
         // `growth` bounds how much the incoming values can lengthen the encoding: 5 bytes each in
         // general, the encoded length of the union for a merged source (inserting a value between
         // two neighbours adds at most the length of its own gap, and a larger rho-encoded value
@@ -1019,6 +1021,7 @@ impl Accumulator {
         if bound < self.max_sparse_bytes() && deferred <= cap {
             self.pending_slack += 5 * self.incoming.len() - growth.min(5 * self.incoming.len());
             self.pending.extend_from_slice(&self.incoming);
+            debug_assert!(self.pending_slack <= 5 * self.pending.len());
             return;
         }
         let enc = self.encoding();
@@ -2039,15 +2042,31 @@ mod tests {
     fn merging_many_sources_equals_adding_their_serialized_forms() {
         let mut next = rng(0x3c6e_f372_fe94_f82b);
         let (mut deferred_runs, mut crossed_runs) = (0, 0);
-        for (p, sp) in [(15, 25), (15, 20), (12, 13), (10, 14), (10, 25)] {
-            for trial in 0..120 {
+        // The small precisions have thresholds of a few hundred bytes, where sums land exactly on it.
+        for (p, sp) in [
+            (15, 25),
+            (15, 20),
+            (12, 13),
+            (10, 11),
+            (10, 12),
+            (10, 14),
+            (10, 25),
+        ] {
+            // Many short runs of small sources at the smallest thresholds, where sums land exactly
+            // on them and an off-by-one in the bound shows.
+            let small = p == 10 && sp <= 12;
+            for trial in 0..if small { 4_000 } else { 120 } {
                 let sizes = [1u64, 3, 12, 60, 200, 500, 900];
                 let mut by_merge = Accumulator::new();
                 let mut by_bytes = Accumulator::new();
                 let sources = 2 + next() % 12;
                 let mut saw_pending = false;
                 for step in 0..sources {
-                    let n = sizes[(next() % 7) as usize];
+                    let n = if small {
+                        1 + next() % 25
+                    } else {
+                        sizes[(next() % 7) as usize]
+                    };
                     let max_values = [1, 3, 40][(next() % 3) as usize];
                     let source = folded(&mut next, p, sp, n, max_values);
                     by_merge.merge(&source).unwrap();
