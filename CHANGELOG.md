@@ -6,6 +6,8 @@ All notable changes to this crate. The format follows
 
 ## [Unreleased]
 
+## [0.2.5] - 2026-10-30
+
 ### Added
 
 - Folding sketches that were decoded beforehand, for engines that keep sparse sketches next to their
