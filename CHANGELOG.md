@@ -34,6 +34,30 @@ All notable changes to this crate. The format follows
   rho-encoded values). On `examples/merge_probe.rs`, per merge of 8 synthetic partials: 31.7 to 22.0
   us and 104.5 to 59.4 us for sparse partials of 2.4 and 7.4 KB; the 0.7 KB and the dense case are
   unchanged.
+- `Accumulator::merge` of several sparse sources in a row defers their values together (one sort and
+  one merge pass over the union instead of a pass per source) for longer: the bound that makes
+  deferral exact now uses the encoded length of each merged source (a sorted run lengthens a union
+  by at most its own encoded length) instead of 5 bytes per value, and up to 16,384 values may wait.
+  Deferral stays exact: after every merge the accumulator equals the reference fold of the
+  serialized sources, checked on random sequences of 2 to 13 sources whose sums land around the
+  threshold (a bound that is too small is caught by the test). On `examples/merge_probe.rs`
+  (synthetic, 8 partials merged into one accumulator, us per merge): 5.4 to 3.0 for partials of
+  0.7 KB and 20.1 to 14.0 for 2.4 KB; partials of 7.4 KB, which end up dense, 54.5 to 59.1 (about
+  8% slower); the dense case is unchanged, and so is the one-by-one fold (`examples/single_value_fold.rs`, within 3%).
+- Setting a register from a sparse value (folding sparse values into a dense accumulator, merging a
+  sparse source into a dense one, converting a sparse union to registers) stores the maximum
+  unconditionally instead of branching on whether the register grows: while the registers fill the
+  branch is unpredictable. Same registers. On `examples/merge_steps.rs` (synthetic, sparse partials
+  of 13 KB into one accumulator, us per merge): 57 to 38 for a merge into a dense accumulator
+  and 187 to 132 for the merge that crosses the threshold; for partials of 22 KB 88 to 74 and
+  279 to 191. `examples/merge_probe.rs`, partials of 22 KB: 129 to 97.5 us per merge; the other
+  rows and one-by-one folds (`examples/single_value_fold.rs`) are unchanged within noise.
+- `Accumulator::merge` of a sparse source into an empty accumulator copies the source's union as it
+  is instead of encoding it to varint bytes, decoding it and copying it again. Same state as
+  `add_bytes(&other.serialize())` (the differential tests cover empty targets, and the multi-source
+  test checks the tracked encoded length against the real one). On `examples/merge_steps.rs`
+  (synthetic, one merge into an empty accumulator, us): 87 to 40 for a partial of 13 KB, 125 to 81
+  for 22 KB, 64 to 33 for 7 KB.
 - `Accumulator::add_trusted_bytes` and `add_bytes` of a small sparse sketch (one to eight values,
   at most 32 bytes) no longer parse it when this thread has folded a sketch of the same length with
   the same bytes before its sparse stream (the same type, versions, precisions and lengths): the
