@@ -1270,9 +1270,7 @@ fn sort_runs(values: &mut [u32]) {
 fn set_register(registers: &mut [u8], enc: Sparse, v: u32) {
     let idx = enc.decode_normal_index(v);
     let rho = enc.decode_normal_rho_w(v);
-    if registers[idx] < rho {
-        registers[idx] = rho;
-    }
+    registers[idx] = registers[idx].max(rho);
 }
 
 /// Register-wise max. Written as a plain zip so the compiler vectorizes it.
