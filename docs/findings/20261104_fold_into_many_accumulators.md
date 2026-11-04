@@ -53,6 +53,16 @@ accumulator (37.3 trusted); on a quiet machine the same example gave 24 and 20.
 - Not measured: the real length distribution. With it, the same harness answers the question
   directly; the engine side can produce a histogram of sketch lengths without any data.
 
+## Real length distribution (follow-up)
+
+A length histogram of the stored sketches of one real month of the engine's data (counts of byte
+lengths only; not reproduced here) showed that nearly all non-NULL sketches are one value (about 22
+bytes), with a small tail of larger ones and most cells NULL. That is the tiny mix: one-value
+sketches at 36 to 50 ns here. For the request that motivated this, the library's share of the fold
+then comes to a minor part of the CPU the engine measured for it; the rest is in the code around the
+fold (key hashing, per-cell null checks and value access, filtering), not in the sketch arithmetic.
+No library change follows from this.
+
 ## Not tried
 
 - The decoded sparse entry points (`add_sparse_batch`) from the engine: they skip the protobuf
