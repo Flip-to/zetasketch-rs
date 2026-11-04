@@ -238,6 +238,11 @@ impl Accumulator {
     /// Incompatible value type or precision with what is already accumulated, as for
     /// [`add_bytes`](Self::add_bytes). Values before the failing one stay added.
     pub fn add_single_values(&mut self, header: &SparseHeader, values: &[u32]) -> Result<()> {
+        if let [v] = values {
+            if self.add_decoded_fast(header, std::slice::from_ref(v), 1) {
+                return Ok(());
+            }
+        }
         self.with_scratch(|acc| {
             for v in values {
                 acc.add_one_sketch(header, std::slice::from_ref(v))?;
@@ -255,7 +260,47 @@ impl Accumulator {
     /// # Errors
     /// As [`add_single_values`](Self::add_single_values).
     pub fn add_sparse_values(&mut self, header: &SparseHeader, values: &[u32]) -> Result<()> {
+        if !values.is_empty() && self.add_decoded_fast(header, values, values.len() as i64) {
+            return Ok(());
+        }
         self.with_scratch(|acc| acc.add_one_sketch(header, values))
+    }
+
+    /// The cases of `add_one_sketch` that need no scratch buffer (a started accumulator of the same
+    /// precisions and compatible types: dense, or sparse with room to defer), without lending the
+    /// per-thread scratch. Returns `false`, with nothing changed, for anything else.
+    #[inline]
+    fn add_decoded_fast(&mut self, h: &SparseHeader, values: &[u32], count: i64) -> bool {
+        if !self.started
+            || self.fallback.is_some()
+            || self.precision != h.precision
+            || self.sparse_precision != h.sparse_precision
+        {
+            return false;
+        }
+        let types = self.allowed & h.allowed;
+        if types == 0 {
+            return false;
+        }
+        if self.dense {
+            self.allowed = types;
+            self.num_values = self.num_values.wrapping_add(count);
+            let enc = self.encoding();
+            for &v in values {
+                set_register(&mut self.registers, enc, v);
+            }
+            return true;
+        }
+        let deferred = self.pending.len() + values.len();
+        if self.sparse_bytes + 5 * deferred - self.pending_slack >= self.max_sparse_bytes()
+            || deferred > MAX_PENDING
+        {
+            return false;
+        }
+        self.allowed = types;
+        self.num_values = self.num_values.wrapping_add(count);
+        self.pending.extend_from_slice(values);
+        true
     }
 
     /// Adds a run of pre-decoded sparse sketches: sketch `i` has `counts[i]` values, taken in order
