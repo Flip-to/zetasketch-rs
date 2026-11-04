@@ -6,6 +6,18 @@ All notable changes to this crate. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- `Accumulator::absorb(other)`: `merge(&other)` for a partial the caller no longer needs. Its values
+  are moved instead of copied: an empty target takes `other` over whole, a sparse `other` whose
+  values provably cannot bring the union to the dense threshold is appended to the deferred values
+  without a sort or merge pass, and a dense target raises its registers straight from `other`'s
+  values. Anything else is `merge`. A differential test checks `absorb` against `merge` after every
+  step (tiny, sparse and dense partials, mixed precisions, a value-type error). On
+  `examples/fine_level_combine.rs` (synthetic: 8 partials of 17 metrics per group, mostly one-value
+  sketches; combine plus estimate, three runs on 2026-11-04): 1.7 to 2.1x faster at 100 and 1,000
+  groups, 1.2 to 1.3x at 5,000, 1.05 to 1.1x at 20,000.
+
 ## [0.2.5] - 2026-10-30
 
 ### Added
