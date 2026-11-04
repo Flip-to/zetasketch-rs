@@ -486,6 +486,76 @@ fn merge_of_partial_accumulators_equals_reference_merge_of_partials() {
     }
 }
 
+/// `absorb(other)` equals `merge(&other)` after every step: partials of tiny, sparse and dense
+/// sizes (many small ones, as in a combine of per-thread groups), mixed precisions, empty
+/// partials, and a type mismatch that must leave the target unchanged.
+#[test]
+fn absorb_equals_merge_at_every_step() {
+    let mut rng = Rng(0x00ab_504b);
+    for round in 0..90 {
+        let mixed = round % 5 == 0;
+        let parts = 2 + rng.below(30) as usize;
+        let partials: Vec<Accumulator> = (0..parts)
+            .map(|_| {
+                let mut a = Accumulator::new();
+                for _ in 0..rng.below(1 + [3, 40, 200][round % 3]) {
+                    let p = if mixed {
+                        [10, 12, 15][rng.below(3) as usize]
+                    } else {
+                        15
+                    };
+                    let mut s = HyperLogLogPlusPlus::for_longs(p).unwrap();
+                    let start = rng.below(200_000) as i64;
+                    for v in start..start + 1 + rng.size([4, 60, 3_000][round % 3]) as i64 {
+                        s.add_long(v).unwrap();
+                    }
+                    a.add_bytes(&s.serialize()).unwrap();
+                }
+                a
+            })
+            .collect();
+        let mut merged = Accumulator::new();
+        let mut absorbed = Accumulator::new();
+        for (i, p) in partials.into_iter().enumerate() {
+            merged.merge(&p).unwrap();
+            absorbed.absorb(p).unwrap();
+            assert_eq!(
+                absorbed.cardinality(),
+                merged.cardinality(),
+                "round {round} step {i}"
+            );
+            assert_eq!(
+                absorbed.num_values(),
+                merged.num_values(),
+                "round {round} step {i}"
+            );
+            assert_eq!(
+                absorbed.precisions(),
+                merged.precisions(),
+                "round {round} step {i}"
+            );
+            assert_eq!(
+                absorbed.serialize(),
+                merged.serialize(),
+                "round {round} step {i}"
+            );
+        }
+        assert_eq!(absorbed.estimate(), merged.estimate(), "round {round}");
+    }
+
+    let mut longs = Accumulator::new();
+    let mut s = HyperLogLogPlusPlus::for_longs(15).unwrap();
+    s.add_long(1).unwrap();
+    longs.add_bytes(&s.serialize()).unwrap();
+    let before = longs.serialize();
+    let mut strings = Accumulator::new();
+    let mut t = HyperLogLogPlusPlus::for_strings(15).unwrap();
+    t.add_str("a").unwrap();
+    strings.add_bytes(&t.serialize()).unwrap();
+    assert!(longs.absorb(strings).is_err());
+    assert_eq!(longs.serialize(), before);
+}
+
 /// Folding chunks on threads and merging gives the same result as folding the same chunks on
 /// one thread and merging (thread-local scratch must not leak state between accumulators).
 #[test]
