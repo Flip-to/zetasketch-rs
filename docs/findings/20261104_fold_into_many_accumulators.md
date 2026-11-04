@@ -8,8 +8,8 @@ drift by up to 1.7x between runs; release build of 0.2.5; synthetic data only
 
 A day-grain request folds one sketch per metric per row into one accumulator per (day, metric): 365
 days x 17 metrics = 6,205 live accumulators per thread, rows sorted by entity then day (69
-entities), `add_bytes` per non-NULL sketch. The engine measured about 41 ns of CPU per sketch
-against 17 to 30 ns in `examples/single_value_fold.rs`. Is the gap the library?
+entities), `add_bytes` per non-NULL sketch. A user of the crate measured a per-sketch CPU cost in
+such a fold well above the 17 to 30 ns of `examples/single_value_fold.rs`. Is the gap the library?
 
 ## Method
 
@@ -36,9 +36,9 @@ accumulator (37.3 trusted); on a quiet machine the same example gave 24 and 20.
 
 ## Reading
 
-- One-value sketches cost 36 to 50 ns here, in line with the engine's 41 ns average once the machine
-  state is accounted for (the same example ran about 2x slower than on a quiet machine). The library
-  is not 25x off. The gap to the 17 to 30 ns example is mostly machine state plus the mix of larger
+- One-value sketches cost 36 to 50 ns here, once the machine state is accounted for (the same
+  example ran about 2x slower than on a quiet machine). The library is not far off the quiet-machine
+  numbers; the gap to the 17 to 30 ns example is mostly machine state plus the mix of larger
   sketches, not a defect.
 - Validation (`add_bytes` against `add_trusted_bytes`) is 4 to 8 ns for one-value sketches and
   within noise for larger ones.
@@ -55,15 +55,16 @@ accumulator (37.3 trusted); on a quiet machine the same example gave 24 and 20.
 
 ## Real length distribution (follow-up)
 
-A length histogram of the stored sketches of one real month of the engine's data (counts of byte
+A length histogram of the stored sketches of one real month of the user's data (counts of byte
 lengths only; not reproduced here) showed that nearly all non-NULL sketches are one value (about 22
 bytes), with a small tail of larger ones and most cells NULL. That is the tiny mix: one-value
 sketches at 36 to 50 ns here. For the request that motivated this, the library's share of the fold
-then comes to a minor part of the CPU the engine measured for it; the rest is in the code around the
-fold (key hashing, per-cell null checks and value access, filtering), not in the sketch arithmetic.
-No library change follows from this.
+is then a minor part of the CPU measured for it; the rest is in the code around the fold (key
+hashing, per-cell null checks and value access, filtering), not in the sketch arithmetic. No
+library change follows from this.
 
 ## Not tried
 
-- The decoded sparse entry points (`add_sparse_batch`) from the engine: they skip the protobuf
-  parse and the per-sketch validation. The library supports them; the engine does not use them.
+- The decoded sparse entry points (`add_sparse_batch`): they skip the protobuf parse and the
+  per-sketch validation. The library supports them; the fold measured by the user does not use
+  them.
