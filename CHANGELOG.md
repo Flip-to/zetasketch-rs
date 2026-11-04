@@ -18,6 +18,15 @@ All notable changes to this crate. The format follows
   sketches; combine plus estimate, three runs on 2026-11-04): 1.7 to 2.1x faster at 100 and 1,000
   groups, 1.2 to 1.3x at 5,000, 1.05 to 1.1x at 20,000.
 
+### Performance
+
+- `Accumulator::add_single_values` with one value and `add_sparse_values` no longer lend the
+  per-thread scratch buffers when the accumulator is dense or can defer the values (the common
+  case); anything else takes the previous path. On `examples/decoded_fold.rs` (synthetic, two
+  interleaved runs, 2026-11-04): one value per call 18.4-18.7 to 7.8 ns into a dense accumulator
+  and 34.3-38.8 to 16.3-18.2 ns spread over 2,000 sparse ones; 2-5 value sketches 35.7 to
+  24.5-28.6 ns (dense) and 110-125 to 82-96 ns (sparse).
+
 ## [0.2.5] - 2026-10-30
 
 ### Added
