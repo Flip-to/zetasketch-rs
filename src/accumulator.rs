@@ -538,6 +538,81 @@ impl Accumulator {
         self.with_scratch(|acc| acc.add_view(&view, other.allowed, true))
     }
 
+    /// [`merge`](Self::merge) of an accumulator the caller no longer needs: the same result, but
+    /// `other`'s values are moved instead of copied. Into an empty accumulator `other` is taken over
+    /// whole; a sparse `other` whose values cannot bring the union to the dense threshold has its
+    /// values appended to the deferred ones without sorting or merging them now (the bound of
+    /// `DECISION(deferred_sparse_merges)`, with `other`'s own bound of its encoded union as the
+    /// growth); into a dense accumulator its values raise the registers in any order. Anything else
+    /// is [`merge`](Self::merge).
+    ///
+    /// Meant for combining per-thread partials with many small groups, where `merge` spends most of
+    /// a call sorting and copying the source's deferred values.
+    ///
+    /// # Errors
+    /// As [`merge`](Self::merge). On error `self` is unchanged.
+    pub fn absorb(&mut self, mut other: Accumulator) -> Result<()> {
+        if !other.started && other.fallback.is_none() {
+            return Ok(());
+        }
+        // A sparse `other` that is one oversized input never merged serializes as dense, so
+        // `merge` (which is `add_bytes(serialize())`) takes care of it.
+        let oversized = !other.dense
+            && other.pending.is_empty()
+            && other.sparse_bytes >= other.max_sparse_bytes();
+        if self.fallback.is_some()
+            || other.fallback.is_some()
+            || oversized
+            || other.sparse_precision == hll::SPARSE_PRECISION_DISABLED
+        {
+            return self.merge(&other);
+        }
+        if !self.started {
+            // `merge` into an empty accumulator makes it a copy of `other`'s state (with the
+            // deferred values merged, which no reader can tell apart).
+            std::mem::swap(self, &mut other);
+            return Ok(());
+        }
+        if other.dense
+            || self.precision != other.precision
+            || self.sparse_precision != other.sparse_precision
+        {
+            return self.merge(&other);
+        }
+        let types = self.allowed & other.allowed;
+        if types == 0 {
+            return self.merge(&other);
+        }
+        let n = other.sparse.len() + other.pending.len();
+        if self.dense {
+            self.allowed = types;
+            self.num_values = self.num_values.wrapping_add(other.num_values);
+            let enc = self.encoding();
+            for &v in other.sparse.iter().chain(&other.pending) {
+                set_register(&mut self.registers, enc, v);
+            }
+            return Ok(());
+        }
+        // `other`'s union is at most this long once encoded (its own deferral bound), and a sorted
+        // run lengthens a union by at most its own encoded length (see `merge_sparse`).
+        let growth = other.sparse_bytes + 5 * other.pending.len() - other.pending_slack;
+        let bound = self.sparse_bytes + 5 * self.pending.len() - self.pending_slack + growth;
+        if bound >= self.max_sparse_bytes() || self.pending.len() + n > MAX_PENDING_MERGE {
+            return self.merge(&other);
+        }
+        self.allowed = types;
+        self.num_values = self.num_values.wrapping_add(other.num_values);
+        self.pending_slack += 5 * n - growth.min(5 * n);
+        if self.pending.is_empty() && self.pending.capacity() < other.pending.capacity() {
+            std::mem::swap(&mut self.pending, &mut other.pending);
+        } else {
+            self.pending.extend_from_slice(&other.pending);
+        }
+        self.pending.extend_from_slice(&other.sparse);
+        debug_assert!(self.pending_slack <= 5 * self.pending.len());
+        Ok(())
+    }
+
     /// Merges an in-memory sketch, with the same result as `add_bytes(&sketch.serialize())`
     /// would give in the reference fold (`merge`), but without serializing or copying it.
     ///
