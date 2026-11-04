@@ -2407,4 +2407,94 @@ mod tests {
         acc.add_sparse_batch(&header, &[2, 1], &[1, 2, 3]).unwrap();
         assert!(!acc.is_empty());
     }
+
+    /// The decoded entry points (scratch-free fast path included) against `add_trusted_bytes` on
+    /// the serialized sketches after every step: small sparse precisions, precision changes and a
+    /// value-type error mixed in. Adapted from a reviewer's fuzz (about 1.96 M steps, no mismatch).
+    #[test]
+    fn decoded_fast_path_equals_trusted_bytes_fold() {
+        let mut next = rng(0x7a11_dec0_ded0_0001);
+        let strings = {
+            let mut s = HyperLogLogPlusPlus::for_strings(15).unwrap();
+            s.add_str("x").unwrap();
+            s.serialize()
+        };
+        let mut steps_total = 0u64;
+        let (mut fast_dense, mut fast_defer) = (0u64, 0u64);
+        for (p, sp) in [(10, 11), (10, 12), (10, 14), (12, 13), (15, 16), (15, 25)] {
+            for trial in 0..250 {
+                let mut by_bytes = Accumulator::new();
+                let mut decoded = Accumulator::new();
+                let pool = [40u64, 2_000, 1_000_000][(next() % 3) as usize];
+                let steps = 20 + next() % 400;
+                for step in 0..steps {
+                    let (bytes, header, values) = if next() % 40 == 0 {
+                        let view = StateView::parse(&strings).unwrap();
+                        let header = SparseHeader::new(
+                            view.value_type,
+                            view.precision,
+                            view.sparse_precision,
+                        )
+                        .unwrap();
+                        let values = encoding::decode_sparse(view.sparse_data.unwrap()).unwrap();
+                        (strings.clone(), header, values)
+                    } else {
+                        let (pp, ssp) = if next() % 60 == 0 {
+                            (p + 1, sp.max(p + 1))
+                        } else {
+                            (p, sp)
+                        };
+                        let mut sk =
+                            HyperLogLogPlusPlus::new(pp, ssp, crate::hll::ValueKind::Long).unwrap();
+                        let n = if next() % 3 == 0 { 1 + next() % 6 } else { 1 };
+                        for _ in 0..n {
+                            sk.add_long((next() % pool) as i64).unwrap();
+                        }
+                        let bytes = sk.serialize();
+                        let view = StateView::parse(&bytes).unwrap();
+                        let header = SparseHeader::new(
+                            view.value_type,
+                            view.precision,
+                            view.sparse_precision,
+                        )
+                        .unwrap();
+                        let values = encoding::decode_sparse(view.sparse_data.unwrap()).unwrap();
+                        if view.num_values != values.len() as i64
+                            || view.sparse_size != values.len() as i32
+                            || values.is_empty()
+                        {
+                            continue;
+                        }
+                        (bytes, header, values)
+                    };
+                    let want = by_bytes.add_trusted_bytes(&bytes);
+                    let was_dense = decoded.dense;
+                    let got = if values.len() == 1 && next() % 2 == 0 {
+                        decoded.add_single_values(&header, &values)
+                    } else {
+                        decoded.add_sparse_values(&header, &values)
+                    };
+                    if was_dense && got.is_ok() {
+                        fast_dense += 1;
+                    } else if got.is_ok() && decoded.started {
+                        fast_defer += 1;
+                    }
+                    let ctx = format!("p {p} sp {sp} trial {trial} step {step}");
+                    assert_eq!(got.is_ok(), want.is_ok(), "{ctx}");
+                    assert_eq!(decoded.num_values(), by_bytes.num_values(), "{ctx}");
+                    assert_eq!(decoded.serialize(), by_bytes.serialize(), "{ctx}");
+                    steps_total += 1;
+                }
+                assert_eq!(
+                    decoded.estimate(),
+                    by_bytes.estimate(),
+                    "p {p} sp {sp} trial {trial}"
+                );
+            }
+        }
+        assert!(
+            steps_total > 50_000 && fast_dense > 200 && fast_defer > 50_000,
+            "{steps_total} {fast_dense} {fast_defer}"
+        );
+    }
 }
