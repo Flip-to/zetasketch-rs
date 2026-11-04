@@ -31,6 +31,39 @@ attempt, including the ones that fail.
 | Radix sort (3 passes of 11 bits) of the deferred values instead of the standard sort | 4.5 ns per value against 5.8 (stable) and 4.9 (unstable) at 2,048 values, and 9.8 against 4.3 and 3.5 at 256; the gain is at most 1.3x at the largest batch and a loss below it. Not worth the code | measurement below |
 | `sort_unstable` instead of the stable `sort` for the deferred values (equal `u32` values are indistinguishable, so the output is identical) | Faster in isolation (about 15% per value) but the sort only runs when deferred values are flushed, rare in a fold. In `examples/single_value_fold.rs` the trusted rows moved 17.1 to 17.3 and 25.8 to 25.0 ns per sketch (noise level), while the validating rows moved 29.4 to 21.2 and 37.5 to 29.2 ns, which a sort swap cannot explain (those runs never reach the sort), so that part is code layout, not the change. Not shipped, no claim made | measurement, three interleaved runs each way |
 
+## Profile of the merge near the dense threshold (what led to the last two shipped changes)
+
+`examples/merge_steps.rs` times each merge of a sequence of sparse partials into one accumulator.
+For partials of 13 KB: the first merge (into an empty accumulator) 87 us, the second 71, the merge
+that crosses the threshold 187, then 57 to 69 for each merge into the dense accumulator. Sources
+settled first (their deferred values already merged) timed the same, so flushing the source is not
+the cost. The first merge cost more than a fold into a dense accumulator because it encoded the union
+to varint bytes and decoded it again (fixed, 87 to 40 us); the per-value register update branch was
+unpredictable while the registers fill (fixed, 57 to 38 us and 187 to 132 us). The remaining cost
+of the crossing merge is the conversion of a sparse union to registers, for which there is no shortcut
+that is provably exact.
+
+## Known differences from `add_bytes(serialize())`
+
+- `Accumulator::merge` takes the allowed value types from the source as they stand (what the Java
+  `merge` of two sketch objects does), while `add_bytes` derives them from the value type written in
+  the serialized sketch. They differ only for a source that began as an UNKNOWN-type sketch, was then
+  narrowed by a typed sketch, and serializes as UNKNOWN again: after the merge the target then
+  rejects a type that `add_bytes` of the serialized source would accept. Found in review, present
+  since before 0.2.5, documented on `Accumulator::merge`. Sketches written by a typed builder never
+  take this path. Not changed because both behaviours are Java's.
+
+## Measuring on this machine
+
+- Fold timings of the same code moved by up to 20% between builds (code layout) and by up to 1.7x
+  between sessions (other jobs running). Compare only binaries built from the two versions, run
+  interleaved, minimum of several runs, and trust differences above about 10%. A claimed 8 ns gain
+  from a sort change turned out to be layout: those runs never reached the sort.
+- A benchmark that keeps each input in its own heap allocation measures a cache miss per input
+  (100 to 250 ns for a one-value sketch); pack the inputs in one buffer like a decoded column.
+- Library-side measurements of folding into many live accumulators are in
+  `20261104_fold_into_many_accumulators.md`.
+
 ## Not tried yet
 
 - Making the cached header cheaper to read (borrow it instead of copying it out of the slot), which
