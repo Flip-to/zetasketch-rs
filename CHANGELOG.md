@@ -6,6 +6,8 @@ All notable changes to this crate. The format follows
 
 ## [Unreleased]
 
+## [0.2.6] - 2026-11-04
+
 ### Added
 
 - `Accumulator::absorb(other)`: `merge(&other)` for a partial the caller no longer needs. Its values
